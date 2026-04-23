@@ -2,6 +2,7 @@
 * Création d'un environnement virtuel
 
 Créer un environnement virtuel permet d'éviter les conflits de versions des bilbiothèques Python. 
+
 Etape n1: 
 ``` 
 python -m venv EnvVirtuel
