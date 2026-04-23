@@ -1,4 +1,10 @@
 # TumorFlow
+* Téléchargement du Dataset
+Pour telecharger le dataset il suffit de se rendre sur le site web suivant:
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17253793.svg)](https://doi.org/10.5281/zenodo.17253793)
+Et ensuite, télécharger le dossier complet.
+![Statistiques du dataset](dataset.png)
+Une fois le dossier téléchargé, veuillez le dézipper dans le dossier de travail.
 
 Section 01 — Fondements mathématiques
 L'EDP se décompose en deux termes : ∇·(D∇c) (diffusion spatiale des cellules) et ρc(1−c) (prolifération logistique). Chaque terme est expliqué biologiquement et mathématiquement, avec le modèle anisotrope de Swanson pour matière blanche/grise.
