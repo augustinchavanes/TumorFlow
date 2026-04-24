@@ -16,6 +16,7 @@ Requires : pip install nibabel numpy matplotlib
 """
 
 import os, sys, warnings
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -39,21 +40,71 @@ TIMEPOINTS = ["baseline", "fu1", "fu2", "fu3", "fu4"]
 SEQUENCES  = ["fla", "t1", "t1c", "t2"]
 SEQ_LABELS = {"fla": "FLAIR", "t1": "T1", "t1c": "T1c", "t2": "T2"}
 
-# Dates réelles des acquisitions (correspondance BraTS <-> DICOM)
-TP_DATES = {
-    "baseline": "07/01/2020",
-    "fu1":      "14/02/2020",
-    "fu2":      "20/05/2020",
-    "fu3":      "10/08/2020",
-    "fu4":      "10/11/2020",
-}
-TP_DELTA = {
-    "baseline": "J0   (référence)",
-    "fu1":      "J38  (+5 semaines)",
-    "fu2":      "J134 (+4,5 mois)",
-    "fu3":      "J216 (+7 mois)",
-    "fu4":      "J308 (+10 mois)",
-}
+# ── Correspondance séquence DICOM → timepoint ─────────────────
+_DICOM_SEQ_PREFIXES = ["FLR", "T1C", "T1w", "T1W", "T2w", "T2W"]
+
+def detect_dates_from_dicom(root):
+    """
+    Lit les noms de sous-dossiers dans <root>/DICOM/ et extrait les dates.
+    Format attendu : <SEQ>_<YYYY-MM-DD> ou <SEQ>_<YYYY-MM-DD> (1)
+    Les doublons (1) sont ignorés. Chaque date unique est associée
+    dans l'ordre chronologique à baseline, fu1, fu2...
+
+    Retourne :
+        tp_dates : {"baseline": "07/01/2020", "fu1": "14/02/2020", ...}
+        tp_delta : {"baseline": "J0 — référence", "fu1": "J38 — +5 sem.", ...}
+    """
+    import re
+    fallback = ({tp: "—" for tp in TIMEPOINTS}, {tp: "—" for tp in TIMEPOINTS})
+
+    dicom_dir = os.path.join(root, "DICOM")
+    if not os.path.isdir(dicom_dir):
+        print("[WARN] Dossier DICOM introuvable — dates non disponibles.")
+        return fallback
+
+    # Regex : date YYYY-MM-DD dans le nom, on ignore tout ce qui suit (ex: " (1)")
+    date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
+    dates_found = set()
+
+    for name in os.listdir(dicom_dir):
+        m = date_re.search(name)
+        if m:
+            try:
+                dates_found.add(datetime.strptime(m.group(1), "%Y-%m-%d"))
+            except ValueError:
+                pass
+
+    if not dates_found:
+        print("[WARN] Aucune date trouvée dans les noms de dossiers DICOM.")
+        return fallback
+
+    sorted_dates = sorted(dates_found)
+    ref_date     = sorted_dates[0]
+    tp_dates, tp_delta = {}, {}
+
+    for tp, dt in zip(TIMEPOINTS, sorted_dates):
+        delta_days   = (dt - ref_date).days
+        tp_dates[tp] = dt.strftime("%d/%m/%Y")
+        if delta_days == 0:
+            tp_delta[tp] = "J0 — référence"
+        elif delta_days < 60:
+            tp_delta[tp] = f"J{delta_days} — +{delta_days // 7} sem."
+        elif delta_days < 400:
+            tp_delta[tp] = f"J{delta_days} — +{round(delta_days/30.44,1)} mois"
+        else:
+            tp_delta[tp] = f"J{delta_days} — +{round(delta_days/365.25,1)} ans"
+
+    for tp in TIMEPOINTS:
+        tp_dates.setdefault(tp, "—")
+        tp_delta.setdefault(tp, "—")
+
+    print(f"[OK] {len(sorted_dates)} date(s) détectée(s) dans DICOM :")
+    for tp in TIMEPOINTS:
+        if tp_dates[tp] != "—":
+            print(f"     {tp:10s} → {tp_dates[tp]}  ({tp_delta[tp]})")
+
+    return tp_dates, tp_delta
+
 
 # Description clinique courte de chaque séquence
 SEQ_DESC = {
@@ -70,20 +121,55 @@ AXIS_DESC = [
     "Vue de côté  — coupe latérale",
 ]
 
-TUMOR_FOLDERS = {
-    "baseline": ["P01_tumor_mask_baseline.nii", "tumour_mask_corr.nii"],
-    "fu1":      ["P01_tumor_mask_fu1.nii",      "tumour_mask.nii"],
-    "fu2":      ["P01_tumor_mask_fu2.nii",       "tumour_mask.nii"],
-    "fu3":      ["P01_tumor_mask_fu3.nii",       "tumour_mask.nii"],
-    "fu4":      ["P01_tumor_mask_fu4.nii",       "tumour_mask.nii"],
-}
-
-
 def load_nii(path):
-    """Charge un volume NIfTI et retourne un array float32 normalisé."""
+    """Charge un volume NIfTI et retourne un array float32."""
     img = nib.load(path)
-    vol = np.asarray(img.dataobj, dtype=np.float32)
-    return vol
+    return np.asarray(img.dataobj, dtype=np.float32)
+
+
+def find_tumor_mask(root, tp):
+    """
+    Cherche le masque tumoral pour un timepoint donné.
+    Gère toutes les variantes observées dans P01/P02/P11 :
+
+    Cas 1 — P01 : tumor segmentation/<PXX>_tumor_mask_<tp>.nii/tumour_mask*.nii
+    Cas 2 — P02/P11 : tumor_segmentation/<PXX>_tumor_mask_<tp>.nii.gz  (fichier direct)
+    """
+    # Candidats pour le dossier racine de segmentation
+    seg_roots = [
+        os.path.join(root, "tumor segmentation"),   # P01 (avec espace)
+        os.path.join(root, "tumor_segmentation"),   # P02/P11 (underscore)
+        os.path.join(root, "tumour segmentation"),
+        os.path.join(root, "tumour_segmentation"),
+    ]
+    seg_root = next((d for d in seg_roots if os.path.isdir(d)), None)
+    if seg_root is None:
+        return None
+
+    # Deviner le préfixe patient depuis le nom du dossier (ex: P01, P02, P11)
+    patient_id = os.path.basename(root.rstrip("/\\"))
+
+    # Cas 2 : fichier .nii.gz direct dans seg_root
+    for fname in os.listdir(seg_root):
+        fl = fname.lower()
+        if tp in fl and fl.endswith((".nii.gz", ".nii")):
+            path = os.path.join(seg_root, fname)
+            if os.path.isfile(path):
+                return path
+
+    # Cas 1 : sous-dossier <PXX>_tumor_mask_<tp>.nii/ contenant tumour_mask*.nii
+    for subfolder in os.listdir(seg_root):
+        if tp not in subfolder.lower():
+            continue
+        sub_path = os.path.join(seg_root, subfolder)
+        if not os.path.isdir(sub_path):
+            continue
+        # Chercher n'importe quel .nii / .nii.gz dedans
+        for fname in sorted(os.listdir(sub_path)):
+            if fname.lower().endswith((".nii.gz", ".nii")):
+                return os.path.join(sub_path, fname)
+
+    return None
 
 
 def find_data(root):
@@ -97,7 +183,6 @@ def find_data(root):
 
     brats_root = os.path.join(root, "BraTS")
     if not os.path.isdir(brats_root):
-        # Essai sans sous-dossier BraTS
         brats_root = root
 
     for tp in TIMEPOINTS:
@@ -115,26 +200,18 @@ def find_data(root):
                         print(f"[WARN] {tp}/{sq} non chargé : {e}")
                     break
 
-    # Masques tumoraux
-    seg_root_candidates = [
-        os.path.join(root, "tumor segmentation"),
-        os.path.join(root, "tumour segmentation"),
-        os.path.join(root, "segmentation"),
-        root,
-    ]
-    seg_root = next((d for d in seg_root_candidates if os.path.isdir(d)), None)
-
-    if seg_root:
-        for tp, (folder, fname) in TUMOR_FOLDERS.items():
-            path = os.path.join(seg_root, folder, fname)
-            if os.path.isfile(path):
-                try:
-                    masks[tp] = load_nii(path)
-                    print(f"[OK] Masque {tp}  →  {masks[tp].shape}")
-                except Exception as e:
-                    print(f"[WARN] Masque {tp} non chargé : {e}")
-    else:
-        print("[WARN] Dossier 'tumor segmentation' introuvable.")
+    # Masques tumoraux — détection automatique multi-format
+    for tp in TIMEPOINTS:
+        mask_path = find_tumor_mask(root, tp)
+        if mask_path:
+            try:
+                masks[tp] = load_nii(mask_path)
+                print(f"[OK] Masque {tp}  →  {masks[tp].shape}  ({os.path.basename(mask_path)})")
+            except Exception as e:
+                print(f"[WARN] Masque {tp} non chargé : {e}")
+        else:
+            if any(data[tp][sq] is not None for sq in SEQUENCES):
+                print(f"[WARN] Masque {tp} introuvable")
 
     return data, masks
 
@@ -181,7 +258,11 @@ def get_slice_2d(volume, idx, axis=2):
 #  3. VIEWER
 # ══════════════════════════════════════════════════════════════
 
-def launch_viewer(data, masks):
+def launch_viewer(data, masks, tp_dates=None, tp_delta=None, patient_id="Patient"):
+    if tp_dates is None:
+        tp_dates = {tp: "—" for tp in TIMEPOINTS}
+    if tp_delta is None:
+        tp_delta = {tp: "—" for tp in TIMEPOINTS}
     # Lister les timepoints disponibles
     available_tp = [tp for tp in TIMEPOINTS if any(data[tp][sq] is not None for sq in SEQUENCES)]
     if not available_tp:
@@ -317,8 +398,8 @@ def launch_viewer(data, masks):
         vol_shape = vol.shape if vol is not None else "—"
         info_text.set_text(
             f"TEMPS  ({tp_label})\n"
-            f"  Date : {TP_DATES.get(tp_key, '—')}\n"
-            f"  Suivi : {TP_DELTA.get(tp_key, '—')}\n"
+            f"  Date : {tp_dates.get(tp_key, '—')}\n"
+            f"  Suivi : {tp_delta.get(tp_key, '—')}\n"
             f"\n"
             f"SÉQUENCE\n"
             f"  {seq_label}\n"
@@ -460,7 +541,7 @@ def launch_viewer(data, masks):
     state["idx"] = n_slices() // 2
     refresh()
 
-    plt.suptitle("🧠  Visionneuse IRM Cérébrale  —  Patient P01", color="white",
+    plt.suptitle(f"🧠  Visionneuse IRM Cérébrale  —  {patient_id}", color="white",
                  fontsize=13, fontweight="bold", y=0.97, fontfamily="monospace")
     fig.text(
         0.5, 0.005,
@@ -485,6 +566,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\n[INFO] Chargement depuis : {folder}")
+
+    # ── Détection automatique des dates depuis les dossiers DICOM ──
+    tp_dates, tp_delta = detect_dates_from_dicom(folder)
+
     data, masks = find_data(folder)
 
     available = [tp for tp in TIMEPOINTS if any(data[tp][sq] is not None for sq in SEQUENCES)]
@@ -493,4 +578,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\n[OK] Timepoints disponibles : {available}")
-    launch_viewer(data, masks)
+    patient_id = os.path.basename(folder.rstrip("/\\"))
+    launch_viewer(data, masks, tp_dates, tp_delta, patient_id)
