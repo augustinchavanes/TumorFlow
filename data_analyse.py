@@ -5,11 +5,11 @@ import numpy as np
 
 # 1. ANALYSE DES DONNÉES CLINIQUES
 # Chargement du fichier "PROTEAS-Clinical_and_demographic_data.xlsx"
-clinical_file = 'PROTEAS-Clinical_and_demographic_data.xlsx'
+clinical_file = r'17253793\PROTEAS-Clinical_and_demographic_data.xlsx'
 clinical_df = pd.read_excel(clinical_file)
 
 # Nettoyage : Extraction de la dose numérique (ex: "20 Gy" -> 20)
-clinical_df['Dose_Gy'] = clinical_df['Rx dose at tumor margins'].str.extract('(\d+)').astype(float)
+clinical_df['Dose_Gy'] = clinical_df['Rx dose at tumor margins'].str.extract(r'(\d+)').astype(float)
 
 # Sélection des colonnes numériques principales
 num_cols_clinical = ['Age (yrs)', 'Fractions', 'Dose_Gy', 'WHO PS', 'Karnofsky PS (%)', 'Number of metastases']
@@ -34,7 +34,7 @@ plt.show()
 
 # 2. ANALYSE DES DONNÉES RADIOMICS
 # Chargement du fichier "PROTEAS-MRI_radiomics_data.xlsx"
-radiomics_file = 'PROTEAS-MRI_radiomics_data.xlsx'
+radiomics_file = r'17253793\PROTEAS-MRI_radiomics_data.xlsx'
 xls_rad = pd.ExcelFile(radiomics_file)
 
 all_patients_data = []
@@ -48,7 +48,7 @@ for sheet in xls_rad.sheet_names:
 
 # Fusion de tous les patients dans un seul DataFrame
 combined_rad_df = pd.concat(all_patients_data, ignore_index=True)
-combined_rad_df = combined_rad_df.apply(pd.to_numeric, errors='ignore')
+combined_rad_df = combined_rad_df.apply(pd.to_numeric, errors='coerce')
 
 # Sélection d'un échantillon de caractéristiques (ex: caractéristiques de forme 'Shape')
 shape_features = [c for c in combined_rad_df.columns if 'shape' in c.lower()][:10]
