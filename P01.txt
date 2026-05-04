@@ -1,0 +1,201 @@
+P01 (exclus : .dcm)
+BraTS
+  baseline
+    fla.nii.gz  [2.5 MB]
+    t1.nii.gz  [2.7 MB]
+    t1c.nii.gz  [2.1 MB]
+    t2.nii.gz  [2.7 MB]
+  fu1
+    fla.nii.gz  [2.6 MB]
+    t1.nii.gz  [2.7 MB]
+    t1c.nii.gz  [2.1 MB]
+    t2.nii.gz  [3.0 MB]
+  fu2
+    fla.nii.gz  [2.6 MB]
+    t1.nii.gz  [2.7 MB]
+    t1c.nii.gz  [2.1 MB]
+    t2.nii.gz  [3.0 MB]
+  fu3
+    fla.nii.gz  [2.5 MB]
+    t1.nii.gz  [2.7 MB]
+    t1c.nii.gz  [2.1 MB]
+    t2.nii.gz  [3.0 MB]
+  fu4
+      fla.nii.gz  [2.5 MB]
+      t1.nii.gz  [2.7 MB]
+      t1c.nii.gz  [2.1 MB]
+      t2.nii.gz  [3.0 MB]
+DICOM
+  FLR_2020-01-07
+  FLR_2020-02-14
+  FLR_2020-05-20
+  FLR_2020-08-10
+  FLR_2020-11-10
+  RTP_2020-01-10
+  T1C_2020-01-07
+  T1C_2020-02-14
+  T1C_2020-05-20
+  T1C_2020-08-10
+  T1C_2020-11-10
+  T1w_2020-01-07
+  T1w_2020-02-14
+  T1W_2020-05-20
+  T1w_2020-08-10
+  T1w_2020-11-10
+  T2w_2020-01-07
+  T2w_2020-02-14
+  T2w_2020-05-20
+  T2w_2020-08-10
+  T2w_2020-11-10
+P01_brain_mask.nii
+  RP01a_brain_mask.nii  [34.1 MB]
+P01_CT.nii
+  P01_CT.nii  [17.0 MB]
+P01_RTP.nii
+  P01_RTP.nii  [34.1 MB]
+tumor segmentation
+    P01_tumor_mask_baseline.nii
+      tumour_mask_corr.nii  [17.0 MB]
+    P01_tumor_mask_fu1.nii
+      tumour_mask.nii  [17.0 MB]
+    P01_tumor_mask_fu2.nii
+      tumour_mask.nii  [17.0 MB]
+    P01_tumor_mask_fu3.nii
+      tumour_mask.nii  [17.0 MB]
+    P01_tumor_mask_fu4.nii
+        tumour_mask.nii  [17.0 MB]
+37 dossier(s), 28 fichier(s)
+
+P02 (exclus : .dcm)
+BraTS
+  baseline
+    fla.nii.gz  [2.2 MB]
+    t1.nii.gz  [2.3 MB]
+    t1c.nii.gz  [1.8 MB]
+    t2.nii.gz  [2.5 MB]
+  fu1
+    fla.nii.gz  [2.1 MB]
+    t1.nii.gz  [2.2 MB]
+    t1c.nii.gz  [1.8 MB]
+    t2.nii.gz  [2.5 MB]
+  fu2
+      fla.nii.gz  [2.2 MB]
+      t1.nii.gz  [2.3 MB]
+      t1c.nii.gz  [1.8 MB]
+      t2.nii.gz  [2.6 MB]
+DICOM
+  FLR_2021-06-10
+  FLR_2021-07-21
+  FLR_2021-11-01
+  RTP_2021-06-15
+  T1C_2021-06-10
+  T1C_2021-07-21
+  T1C_2021-11-01
+  T1w_2021-06-10
+  T1w_2021-07-21
+  T1w_2021-11-01
+  T2w_2021-06-10
+  T2w_2021-07-21
+  T2w_2021-11-01
+P02_brain_mask.nii
+  P02_brain_mask.nii  [34.1 MB]
+P02_CT.nii
+  P02_CT.nii  [17.0 MB]
+P02_RTP.nii
+  P02_RTP.nii  [34.1 MB]
+tumor_segmentation
+    P02_tumor_mask_baseline.nii.gz  [22.2 KB]
+    P02_tumor_mask_fu1.nii.gz  [19.2 KB]
+    P02_tumor_mask_fu2.nii.gz  [19.2 KB]
+22 dossier(s), 18 fichier(s)
+
+P11 (exclus : .dcm)
+BraTS
+  baseline
+    fla.nii.gz  [1.9 MB]
+    t1.nii.gz  [2.1 MB]
+    t1c.nii.gz  [1.6 MB]
+    t2.nii.gz  [2.3 MB]
+  fu1
+    fla.nii.gz  [2.1 MB]
+    t1.nii.gz  [2.3 MB]
+    t1c.nii.gz  [1.7 MB]
+    t2.nii.gz  [2.4 MB]
+  fu2
+    fla.nii.gz  [2.1 MB]
+    t1.nii.gz  [2.2 MB]
+    t1c.nii.gz  [1.7 MB]
+    t2.nii.gz  [2.4 MB]
+  fu3
+    fla.nii.gz  [2.1 MB]
+    t1.nii.gz  [2.3 MB]
+    t1c.nii.gz  [1.7 MB]
+    t2.nii.gz  [2.4 MB]
+  fu4
+      fla.nii.gz  [2.2 MB]
+      t1.nii.gz  [2.1 MB]
+      t1c.nii.gz  [1.7 MB]
+      t2.nii.gz  [2.4 MB]
+DICOM
+  FLR_2021-11-10
+  FLR_2021-11-10 (1)
+  FLR_2022-01-24
+  FLR_2022-01-24 (1)
+  FLR_2022-05-09
+  FLR_2022-05-09 (1)
+  FLR_2022-07-20
+  FLR_2022-07-20 (1)
+  FLR_2022-11-09
+  FLR_2022-11-09 (1)
+  FLR_2023-05-04
+  FLR_2023-05-04 (1)
+  RTP_2021-11-17
+  T1C_2021-11-10
+  T1C_2021-11-10 (1)
+  T1C_2022-01-24
+  T1C_2022-01-24 (1)
+  T1C_2022-05-09
+  T1C_2022-05-09 (1)
+  T1C_2022-07-20
+  T1C_2022-07-20 (1)
+  T1C_2022-11-09
+  T1C_2022-11-09 (1)
+  T1C_2023-05-04
+  T1C_2023-05-04 (1)
+  T1w_2021-11-10
+  T1w_2021-11-10 (1)
+  T1w_2022-01-24
+  T1w_2022-01-24 (1)
+  T1w_2022-05-09
+  T1w_2022-05-09 (1)
+  T1W_2022-07-20
+  T1W_2022-07-20 (1)
+  T1W_2022-11-09
+  T1W_2022-11-09 (1)
+  T1W_2023-05-04
+  T1W_2023-05-04 (1)
+  T2w_2021-11-10
+  T2w_2021-11-10 (1)
+  T2w_2022-01-24
+  T2w_2022-01-24 (1)
+  T2w_2022-05-09
+  T2w_2022-05-09 (1)
+  T2W_2022-07-20
+  T2W_2022-07-20 (1)
+  T2W_2022-11-09
+  T2W_2022-11-09 (1)
+  T2W_2023-05-04
+  T2W_2023-05-04 (1)
+P11_brain_mask.nii
+  P11_brain_mask.nii  [34.1 MB]
+P11_CT.nii
+  P11_CT.nii  [17.0 MB]
+P11_RTP.nii
+  P11_RTP.nii  [34.1 MB]
+tumor_segmentation
+    P11_tumor_mask_baseline.nii.gz  [20.6 KB]
+    P11_tumor_mask_fu1.nii.gz  [19.0 KB]
+    P11_tumor_mask_fu2.nii.gz  [19.2 KB]
+    P11_tumor_mask_fu3.nii.gz  [18.7 KB]
+    P11_tumor_mask_fu4.nii.gz  [19.1 KB]
+60 dossier(s), 28 fichier(s)
