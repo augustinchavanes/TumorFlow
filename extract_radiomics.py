@@ -16,7 +16,7 @@ import pandas as pd
 
 # ── Chemins ────────────────────────────────────────────────────────────────────
 XLSX_PATH   = '17253793\PROTEAS-MRI_radiomics_data.xlsx'   # adapte ce chemin si besoin
-OUTPUT_PATH = 'master_simulation_data.csv'
+OUTPUT_PATH = 'radiomics_features.csv'
 
 # ── Filtres ────────────────────────────────────────────────────────────────────
 TARGET_MASKS      = ['mask_tumor', 'mask_oedema']

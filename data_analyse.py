@@ -197,3 +197,38 @@ sns.heatmap(combined_rad_df[shape_features].corr(), annot=True, cmap='viridis')
 plt.title('Corrélation entre caractéristiques Radiomics (Shape)')
 plt.tight_layout()
 plt.show()
+
+# 2. ANALYSE DES DONNÉES RADIOMICS
+radiomics_file = r'17253793\PROTEAS-MRI_radiomics_data.xlsx'
+xls_rad = pd.ExcelFile(radiomics_file)
+
+all_patients_data = []
+print("\n" + "=" * 80)
+print("ANALYSE DES VALEURS MANQUANTES PAR FEUILLE (RADIOMICS)")
+print("=" * 80)
+
+# On parcourt chaque feuille
+for sheet in xls_rad.sheet_names:
+    df_sheet = pd.read_excel(xls_rad, sheet_name=sheet)
+    
+    # Calcul du nombre de valeurs manquantes dans cette feuille précise
+    n_missing = df_sheet['RadiomicsValue'].isnull().sum()
+    
+    if n_missing > 0:
+        print(f"⚠️ Patient {sheet} : {n_missing} valeurs manquantes détectées.")
+    else:
+        print(f"✅ Patient {sheet} : Aucune valeur manquante.")
+    
+    # Pivoter les données pour la suite du traitement
+    df_pivoted = df_sheet.set_index('RadiomicsFeature').T
+    df_pivoted['Patient_ID'] = sheet
+    all_patients_data.append(df_pivoted)
+
+# Fusion de tous les patients dans un seul DataFrame
+combined_rad_df = pd.concat(all_patients_data, ignore_index=True)
+
+# Affichage du total général
+print("=" * 80)
+total_missing_rad = combined_rad_df.isnull().sum().sum()
+print(f"TOTAL GÉNÉRAL RADIOMICS : {total_missing_rad} valeurs manquantes sur l'ensemble des patients.")
+print("=" * 80)

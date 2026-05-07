@@ -27,6 +27,33 @@ Et ensuite, télécharger le dossier complet.
 
 Une fois le dossier téléchargé, veuillez le dézipper dans le dossier de travail.
 
+# Etapes à suivre pour instancier le projet 
+## Unzipper de manière recursive le dossier 17253793/
+Pour cela, il suffit d'activer l'environnement virtuel créer avec toutes les bibliothèques d'installées (requirements.txt) et ensuite de lancer le script unzip_folder avec python unzip_folder.py
+
+Cela permet d'avoir accès au dossier des patients avec toutes les informations cliniques et nifti. 
+
+## Analyse des données
+Lancer data_analyse.py 
+
+Ce script python permet de comprendre, notamment avec des graphiques (Voir DataAnalyse/) de quelles données sont constituées notre dataset.
+
+Une phase de nettoyage a ete realise pour enlever les valeurs manquantes.
+
+## Extraction des informations clés
+Lancer exctract_clinical_variables.py
+
+Lancer exctract_nifti_features.py
+
+Lancer exctract_radiomics.py
+
+Cela permet d'obtenir seulement les informations importantes pour l'entrainement de notre ML afin de predire l'evolution et la diffusion de la tumeur dans le cerveau. 
+
+Trois fichiers csv seront alors sortis clinical_features.csv, nifti_features.csv, radiomics_features.csv 
+
+A faire: Realiser une future analyse du dataset complet avant entrainement de modele 
+
+
 ## Description du dataset
 
 Ce dataset est une étude de cas longitudinale (suivi dans le temps) d'une quarantaine de patients atteints d'une tumeur cérébrale, combinant imagerie multimodale et données de planification thérapeutique.
