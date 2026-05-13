@@ -598,8 +598,8 @@ def estimate_patient_parameters(volumes_mm3, times_days,
         opt = differential_evolution(
             objective,
             bounds=[
-                (1e-4, 2.0),           # r
-                (0.0, 3.0),            # alpha
+                (0.005, 0.1),           # r
+                (0.0, 0.2),            # alpha
                 (0.0, t_treat_hi),     # t_treat
             ],
             seed=42, maxiter=400, tol=1e-9,
@@ -786,7 +786,7 @@ def train_and_evaluate(
     min_samples_leaf: int = 2,
     test_size:    float = 0.2,
     n_cv_folds:   int   = 5,
-    output_dir:   Path  = Path("results"),
+    output_dir:   Path  = Path("results_rfml"),
 ):
     """
     Entraîne le Random Forest multi-sorties et évalue ses performances.
@@ -965,15 +965,14 @@ def train_and_evaluate(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def simulate_pde_3d(D: float, r: float, alpha: float,
-                     u0_3d: np.ndarray, dx_mm: float,
-                     t_days: float, c0: float = C0,
-                     lam: float = LAMBDA_DRUG,
-                     t_treat: float = 0.0):
+                   u0_3d: np.ndarray, dx_mm: float,
+                   t_days: float, c0: float = C0,
+                   lam: float = LAMBDA_DRUG,
+                   t_treat: float = 0.0):
     """
-    Résout ∂u/∂t = D·∇²u + r·u·(1−u) − α·c(t)·u sur grille 3D,
-    avec c(t)=0 si t < t_treat, sinon c(t)=c0·exp(−λ·(t−t_treat)).
-
-    Schéma : Euler explicite, CFL automatique, conditions de Neumann aux bords.
+    Version corrigée : 
+    1. Utilise la somme intégrale de 'u' pour des courbes fluides (plus de plateau à zéro).
+    2. Simule un protocole réel de 6 cycles (une dose tous les 28 jours).
     """
     dt_cfl  = (dx_mm ** 2) / (6.0 * D + 1e-12)
     dt      = min(1.0, dt_cfl * 0.9)
@@ -982,24 +981,34 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
 
     u       = u0_3d.astype(np.float64).copy()
     vox_vol = dx_mm ** 3
-    volumes = [float((u > 0.5).sum() * vox_vol)]
+    
+    # CORRECTION 1 : On utilise np.sum(u) dès le départ pour la fluidité
+    volumes = [float(np.sum(u) * vox_vol)]
 
-    log.info(f"Simulation EDP 3D | grille {u.shape} | {n_steps} pas × {dt:.3f}j | "
-             f"D={D:.4f}  r={r:.5f}  α={alpha:.4f}")
+    log.info(f"Simulation EDP 3D | Protocole Multi-cycles | D={D:.4f}  r={r:.5f}  α={alpha:.4f}")
 
     for step in range(n_steps):
         t_now = step * dt
-        if t_now < t_treat:
-            c_t = 0.0
-        else:
-            c_t = c0 * np.exp(-lam * (t_now - t_treat))
+        
+        # CORRECTION 2 : Modélisation d'un protocole de 6 cycles (Témozolomide-like)
+        c_t = 0.0
+        if t_now >= t_treat:
+            # On simule 6 cycles de traitement espacés de 28 jours
+            for i in range(6):
+                t_cycle_start = t_treat + (i * 28)
+                if t_now >= t_cycle_start:
+                    # Chaque cycle ajoute sa propre concentration qui décroît
+                    c_t += c0 * np.exp(-lam * (t_now - t_cycle_start))
+
+        # Calcul du Laplacien (Diffusion)
         lap = (
               np.roll(u,-1,0)+np.roll(u,1,0)
             + np.roll(u,-1,1)+np.roll(u,1,1)
             + np.roll(u,-1,2)+np.roll(u,1,2)
             - 6.0 * u
         ) / dx_mm ** 2
-        # Conditions de Neumann (flux nul)
+        
+        # Conditions de Neumann (bords du cerveau)
         for ax in range(3):
             s0 = [slice(None)]*3; s0[ax] = 0
             s1 = [slice(None)]*3; s1[ax] = 1
@@ -1007,8 +1016,12 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
             s2 = [slice(None)]*3; s2[ax] = -2
             lap[tuple(s0)] = lap[tuple(s1)]
             lap[tuple(sm)] = lap[tuple(s2)]
+        
+        # Mise à jour de la densité tumorale
         u = np.clip(u + dt*(D*lap + r*u*(1.0-u) - alpha*c_t*u), 0.0, 1.0)
-        volumes.append(float((u > 0.5).sum() * vox_vol))
+        
+        # CORRECTION 1 (suite) : Somme intégrale pour suivre l'évolution sans seuil brutal
+        volumes.append(float(np.sum(u) * vox_vol))
 
     return u, volumes
 
@@ -1019,7 +1032,7 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
 
 def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
                          simulate_days: float = 30.0,
-                         output_dir: Path = Path("results")) -> dict:
+                         output_dir: Path = Path("results_rfml")) -> dict:
     """
     1. Extrait les features NIfTI depuis les fichiers réels du patient
     2. Prédit D, r, α avec le Random Forest sauvegardé
@@ -1150,7 +1163,7 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
 
 def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
                    metrics_df: pd.DataFrame, sim_result: dict = None,
-                   output_dir: Path = Path("results")):
+                   output_dir: Path = Path("results_rfml")):
     try:
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -1248,7 +1261,7 @@ def parse_args():
     # Évaluation
     p.add_argument("--test_size",  type=float, default=0.2)
     p.add_argument("--n_cv_folds", type=int,   default=5)
-    p.add_argument("--output",     default="results")
+    p.add_argument("--output",     default="results_rfml")
     # Prédiction
     p.add_argument("--predict",      action="store_true")
     p.add_argument("--patient_id",   default=None, help="Ex: P04a")

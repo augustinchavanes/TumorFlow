@@ -1,4 +1,6 @@
 17253793/
 EnvVirtuel/
 results_mlp6/
-_pycache_/
+__pycache__/ 
+results_rfml/
+results_rfml_agressif
