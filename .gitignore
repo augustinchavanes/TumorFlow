@@ -3,4 +3,5 @@ EnvVirtuel/
 results_mlp6/
 __pycache__/ 
 results_rfml/
-results_rfml_agressif
+results_rfml_agressif/
+prediction/

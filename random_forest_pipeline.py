@@ -50,7 +50,7 @@ Usage :
   # Avec options
   python tumor_pde_ml_pipeline.py --data_dir 17253793 --dt_days 56 --output results/
 
-  # Prédiction nouveau patient
+  # Prédiction nouveau patient (sorties dans prediction/<patient_id>/)
   python tumor_pde_ml_pipeline.py --predict --patient_id P04a --simulate_days 30
 ================================================================================
 """
@@ -313,7 +313,8 @@ def extract_volume_from_mask(seg_path: Path):
         import nibabel as nib
         img  = nib.load(str(seg_path))
         data = img.get_fdata()
-        return float((data > 0).sum() * np.prod(img.header.get_zooms()))
+        zooms = np.asarray(img.header.get_zooms()[:3], dtype=float)
+        return float((data > 0).sum() * np.prod(zooms))
     except Exception as e:
         log.debug(f"Masque non lisible ({seg_path.name}) : {e}")
         return None
@@ -968,11 +969,16 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
                    u0_3d: np.ndarray, dx_mm: float,
                    t_days: float, c0: float = C0,
                    lam: float = LAMBDA_DRUG,
-                   t_treat: float = 0.0):
+                   t_treat: float = 0.0,
+                   voxel_volume_mm3: float = None):
     """
     Version corrigée : 
     1. Utilise la somme intégrale de 'u' pour des courbes fluides (plus de plateau à zéro).
     2. Simule un protocole réel de 6 cycles (une dose tous les 28 jours).
+
+    voxel_volume_mm3 : volume d'un voxel en mm³ (ex. prod(zooms) du NIfTI).
+        Si fourni, les volumes rapportés coïncident avec ceux des masques (extract_volume_from_mask).
+        Sinon : dx_mm**3 (grille isotrope).
     """
     dt_cfl  = (dx_mm ** 2) / (6.0 * D + 1e-12)
     dt      = min(1.0, dt_cfl * 0.9)
@@ -980,7 +986,7 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
     dt      = t_days / n_steps
 
     u       = u0_3d.astype(np.float64).copy()
-    vox_vol = dx_mm ** 3
+    vox_vol = float(voxel_volume_mm3) if voxel_volume_mm3 is not None else float(dx_mm ** 3)
     
     # CORRECTION 1 : On utilise np.sum(u) dès le départ pour la fluidité
     volumes = [float(np.sum(u) * vox_vol)]
@@ -1032,7 +1038,8 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
 
 def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
                          simulate_days: float = 30.0,
-                         output_dir: Path = Path("results_rfml")) -> dict:
+                         output_dir: Path = Path("results_rfml"),
+                         dt_days: float = 56.0) -> dict:
     """
     1. Extrait les features NIfTI depuis les fichiers réels du patient
     2. Prédit D, r, α avec le Random Forest sauvegardé
@@ -1094,15 +1101,18 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
     print(f"  v_front = 2√(rD) = {2*np.sqrt(r_pred*D_pred):.4f} mm/jour")
     print(f"  λ_front = √(D/r) = {np.sqrt(D_pred/r_pred):.2f}  mm")
 
-    # Condition initiale depuis masque baseline
+    # Condition initiale depuis masque baseline (u=1 dans la tumeur : même volumétrie que les masques)
     seg_array, dx_mm = None, 1.0
+    vox_vol_mm3 = None
     if paths["seg"]["baseline"].exists():
         try:
             import nibabel as nib
             seg_img   = nib.load(str(paths["seg"]["baseline"]))
-            dx_mm     = float(seg_img.header.get_zooms()[0])
+            zs        = np.asarray(seg_img.header.get_zooms()[:3], dtype=float)
+            vox_vol_mm3 = float(np.prod(zs))
+            dx_mm     = float(zs[0])
             seg_array = np.clip(
-                (seg_img.get_fdata() > 0).astype(float) * 0.8, 0.0, 1.0
+                (seg_img.get_fdata() > 0).astype(np.float64), 0.0, 1.0
             )
         except Exception as e:
             log.warning(f"Segmentation non chargeable : {e}")
@@ -1112,16 +1122,18 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         zz, yy, xx = np.ogrid[:g, :g, :g]
         seg_array = np.where(
             np.sqrt((xx-c)**2 + (yy-c)**2 + (zz-c)**2) < 10/dx_mm,
-            0.8, 0.0
+            1.0, 0.0
         )
         log.info("Sphère synthétique utilisée (masque absent)")
 
     u_final, volumes = simulate_pde_3d(
         D_pred, r_pred, alpha_pred, seg_array, dx_mm, simulate_days,
         t_treat=t_treat_pred,
+        voxel_volume_mm3=vox_vol_mm3,
     )
-    V_i = float((seg_array > 0.5).sum() * dx_mm**3)
-    V_f = float((u_final > 0.5).sum() * dx_mm**3)
+    vox_report = vox_vol_mm3 if vox_vol_mm3 is not None else float(dx_mm ** 3)
+    V_i = float((seg_array > 0.5).sum() * vox_report)
+    V_f = float((u_final > 0.5).sum() * vox_report)
     s   = "+" if V_f >= V_i else ""
     print(f"\n  ── Simulation T+{simulate_days:.0f}j ────────────────────────────────────")
     print(f"  Volume initial  : {V_i:>10.1f} mm³")
@@ -1145,6 +1157,25 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         "volume_mm3": volumes,
     }).to_csv(output_dir / f"{patient_id}_volumes_sim.csv", index=False)
 
+    # Volumes masques baseline + follow_up_* (graphique uniquement ; FU filtrés au tracé si t > simulate_days)
+    obs_t, obs_v = [], []
+    base_seg = paths["seg"]["baseline"]
+    if base_seg.exists():
+        vb = extract_volume_from_mask(base_seg)
+        if vb is not None and vb > 0:
+            obs_t.append(0.0)
+            obs_v.append(float(vb))
+    for tp_label in ("follow_up_1", "follow_up_2", "follow_up_3", "follow_up_4"):
+        seg_p = paths["seg"][tp_label]
+        if not seg_p.exists():
+            continue
+        vol_m = extract_volume_from_mask(seg_p)
+        if vol_m is None or vol_m <= 0:
+            continue
+        tp_int = TIMEPOINT_TO_INT[tp_label]
+        obs_t.append(float(tp_int * dt_days))
+        obs_v.append(float(vol_m))
+
     return dict(
         D_pred=D_pred, r_pred=r_pred, alpha_pred=alpha_pred,
         t_treat_pred=t_treat_pred,
@@ -1154,6 +1185,8 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         volumes_evolution=volumes,
         V_initial_mm3=V_i, V_final_mm3=V_f,
         dx_mm=dx_mm, simulate_days=simulate_days,
+        clinical_time_days=np.asarray(obs_t, dtype=float),
+        clinical_volume_mm3=np.asarray(obs_v, dtype=float),
     )
 
 
@@ -1226,11 +1259,39 @@ def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
         ax.plot(days, vols, color="#E63946", lw=2.5, label="Volume simulé (EDP)")
         ax.axhline(vols[0], color="gray", ls=":", lw=1.5, label="Volume initial")
         ax.fill_between(days, vols[0], vols, alpha=0.1, color="#E63946")
+
+        ct = sim_result.get("clinical_time_days")
+        cv = sim_result.get("clinical_volume_mm3")
+        t_win = float(sim_result.get("simulate_days", days[-1] if len(days) else 0.0))
+        if ct is not None and cv is not None:
+            ct = np.asarray(ct, dtype=float)
+            cv = np.asarray(cv, dtype=float)
+            if ct.size > 0 and cv.size == ct.size:
+                m = ct <= t_win + 1e-9
+                ct = ct[m]
+                cv = cv[m]
+            if ct.size > 0 and cv.size == ct.size:
+                o = np.argsort(ct)
+                ax.plot(ct[o], cv[o], color="#1D3557", ls="--", lw=1.3, alpha=0.65,
+                        label="Suivi (baseline + FU, masques)")
+                ax.scatter(ct, cv, color="#1D3557", s=85, zorder=5,
+                           edgecolors="white", linewidths=1.0,
+                           label="Volumes dossier (t ≤ T sim.)")
+
         ax.set(xlabel="Temps (jours)", ylabel="Volume tumoral (mm³)",
                title=(f"Simulation EDP 3D — T+{sim_result['simulate_days']:.0f}j\n"
                       f"D={sim_result['D_pred']:.4f} mm²/j  "
                       f"r={sim_result['r_pred']:.5f} /j  "
                       f"α={sim_result['alpha_pred']:.4f} /j"))
+
+        ymin, ymax = float(np.min(vols)), float(np.max(vols))
+        if ct is not None and cv is not None and ct.size > 0 and cv.size == ct.size:
+            ymin = min(ymin, float(np.min(cv)))
+            ymax = max(ymax, float(np.max(cv)))
+        pad_y = (ymax - ymin) * 0.06 + 1e-6
+        ax.set_ylim(max(0.0, ymin - pad_y), ymax + pad_y)
+        ax.set_xlim(0.0, max(t_win, 1e-6))
+
         ax.legend()
         ax.grid(alpha=0.3)
         plt.tight_layout()
@@ -1289,12 +1350,19 @@ def main():
         model_pkl = output_dir / "pde_ml_model.pkl"
         if not model_pkl.exists():
             log.error(f"Modèle introuvable : {model_pkl}"); sys.exit(1)
+        pred_out = script_dir / "prediction" / args.patient_id
+        pred_out.mkdir(parents=True, exist_ok=True)
         sim = predict_new_patient(
             model_pkl, data_dir / args.patient_id,
-            args.patient_id, args.simulate_days, output_dir,
+            args.patient_id, args.simulate_days, pred_out,
+            dt_days=args.dt_days,
         )
         generate_plots(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
-                       sim_result=sim, output_dir=output_dir)
+                       sim_result=sim, output_dir=pred_out)
+        rel = Path("prediction") / args.patient_id
+        print(f"\n  Les sorties de prédiction sont dans le dossier : {rel.as_posix()}/")
+        print(f"  (chemin complet : {pred_out.resolve()}/)\n")
+        log.info("Prédictions écrites dans %s", pred_out.resolve())
         return
 
     # ── Pipeline d'entraînement ───────────────────────────────────────────────
