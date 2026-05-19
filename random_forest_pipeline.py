@@ -91,7 +91,7 @@ log = logging.getLogger(__name__)
 # CONSTANTES
 # ─────────────────────────────────────────────────────────────────────────────
 LAMBDA_DRUG = np.log(2) / 14.0   # demi-vie médicament ≈ 14 jours [1/j]
-C0          = 1.0                 # concentration normalisée à t=0
+C0          = 0.90                 # concentration normalisée à t=0
 
 TARGET_PARAMS = ["D", "r", "alpha"]
 
@@ -999,9 +999,9 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
         # CORRECTION 2 : Modélisation d'un protocole de 6 cycles (Témozolomide-like)
         c_t = 0.0
         if t_now >= t_treat:
-            # On simule 6 cycles de traitement espacés de 28 jours
+            # On simule 6 cycles de traitement espacés de 40.0 jours
             for i in range(6):
-                t_cycle_start = t_treat + (i * 28)
+                t_cycle_start = t_treat + (i *70.0)  # 40 jours = 4 semaines = 40 jours pour être conservateur)
                 if t_now >= t_cycle_start:
                     # Chaque cycle ajoute sa propre concentration qui décroît
                     c_t += c0 * np.exp(-lam * (t_now - t_cycle_start))
