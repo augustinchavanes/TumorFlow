@@ -1,85 +1,267 @@
 # TumorFlow
-* Création d'un environnement virtuel
 
-Créer un environnement virtuel permet d'éviter les conflits de versions des bilbiothèques Python. 
+Plateforme de traitement et de modélisation de tumeurs cérébrales à partir de données IRM longitudinales (BraTS-like), données cliniques et segmentation tumorale.
 
-Etape n1: 
-``` 
+Le projet couvre :
+- préparation des données,
+- extraction de features tabulaires,
+- entraînement/prédiction de paramètres d’un modèle PDE (Fisher-KPP avec terme de traitement),
+- simulation 3D de l’évolution tumorale,
+- visualisation 2D/3D des volumes.
+
+![Statistiques du dataset](dataset.png)
+
+---
+
+## 1) Objectif du projet
+
+L’idée est de prédire des paramètres biologiques/physiques de croissance tumorale :
+- `D` : diffusion/invasion,
+- `r` : prolifération,
+- `alpha` : effet du traitement (chimio modélisée),
+
+puis de simuler l’évolution volumique d’un patient dans le temps.
+
+Le pipeline principal actuel est `random_forest_pipeline.py`.
+
+---
+
+## 2) Installation rapide
+
+### Prérequis
+- Python 3.10+ (testé en environnement Windows/PowerShell),
+- accès au dataset Zenodo.
+
+### Setup
+
+```powershell
 python -m venv EnvVirtuel
-```
-Etape n2:
-```
 .\EnvVirtuel\Scripts\activate
-```
-Etape n3:
-```
 pip install -r .\requirements.txt
 ```
 
-* Téléchargement du Dataset
+---
 
-Pour telecharger le dataset il suffit de se rendre sur le site web suivant:
+## 3) Dataset
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17253793.svg)](https://doi.org/10.5281/zenodo.17253793)
+Source :
+[Zenodo DOI 10.5281/zenodo.17253793](https://doi.org/10.5281/zenodo.17253793)
 
-Et ensuite, télécharger le dossier complet.
-![Statistiques du dataset](dataset.png)
+Après téléchargement, placer `17253793/` à la racine du repo puis dézipper récursivement si nécessaire :
 
-Une fois le dossier téléchargé, veuillez le dézipper dans le dossier de travail.
+```powershell
+python .\unzip_folder.py
+```
 
-# Etapes à suivre pour instancier le projet 
-## Unzipper de manière recursive le dossier 17253793/
-Pour cela, il suffit d'activer l'environnement virtuel créer avec toutes les bibliothèques d'installées (requirements.txt) et ensuite de lancer le script unzip_folder avec python unzip_folder.py
+### Structure attendue (exemple patient)
 
-Cela permet d'avoir accès au dossier des patients avec toutes les informations cliniques et nifti. 
+```text
+17253793/
+  P03/
+    BraTS/
+      baseline/
+        fla.nii.gz
+        t1.nii.gz
+        t1c.nii.gz
+        t2.nii.gz
+      fu1/ ... fu4/
+    tumor_segmentation/
+      P03_tumor_mask_baseline.nii.gz
+      P03_tumor_mask_fu1.nii.gz
+      ...
+    P03_brain_mask.nii.gz
+    P03_CT.nii.gz
+    P03_RTP.nii.gz
+    DICOM/
+      ...
+```
 
-## Analyse des données
-Lancer `python DataAnalyse/data_analyse.py`
+---
 
-Ce script python permet de comprendre, notamment avec des graphiques (Voir DataAnalyse/) de quelles données sont constituées notre dataset.
+## 4) Arborescence du projet (dossiers utiles)
 
-Une phase de nettoyage a ete realise pour enlever les valeurs manquantes.
+- `17253793/` : données patients
+- `features/` : CSV de features + wrappers d’extraction
+- `results_rfml/` : résultats d’entraînement RF (modèle, métriques, prédictions)
+- `prediction/<Patient_ID>/` : sorties de simulation patient
+- `visualisation/` : viewers IRM (2D/3D)
+- `DataAnalyse/` : script d’analyse exploratoire
 
-## Extraction des informations clés
-Lancer exctract_clinical_variables.py
+Scripts principaux :
+- `random_forest_pipeline.py` (pipeline principal),
+- `extract_radiomics.py`, `extract_nifti_features.py`, `exctract_clinical_variables.py` (génération des features),
+- `visualisation/brain_scanner_viewer.py`, `visualisation/brain3d_viewer.py` (visualisation).
 
-Lancer exctract_nifti_features.py
+---
 
-Lancer exctract_radiomics.py
+## 5) Workflow recommandé (nouvel arrivant)
 
-Cela permet d'obtenir seulement les informations importantes pour l'entrainement de notre ML afin de predire l'evolution et la diffusion de la tumeur dans le cerveau. 
+### Étape A — Analyse exploratoire
 
-Trois fichiers csv seront alors sortis clinical_features.csv, nifti_features.csv, radiomics_features.csv 
+```powershell
+python .\DataAnalyse\data_analyse.py
+```
 
-A faire: Realiser une future analyse du dataset complet avant entrainement de modele 
+### Étape B — Générer les features
 
+Les sorties sont écrites dans `features/` :
+- `features/clinical_features.csv`
+- `features/radiomics_features.csv`
+- `features/nifti_features.csv`
 
-## Description du dataset
+Commandes :
 
-Ce dataset est une étude de cas longitudinale (suivi dans le temps) d'une quarantaine de patients atteints d'une tumeur cérébrale, combinant imagerie multimodale et données de planification thérapeutique.
+```powershell
+python .\exctract_clinical_variables.py
+python .\extract_radiomics.py
+python .\extract_nifti_features.py
+```
 
-### Organisation des fichiers pour un patient
+Tu peux aussi lancer les wrappers dans `features/` :
 
-#### 1.Imagerie de Référence (Dossier `BraTS`)
-Ce dossier contient des images IRM traitées selon les standards du défi **BraTS** (Brain Tumor Segmentation). Le suivi est divisé en **5 étapes temporelles** :
-* **`baseline`** : État initial au diagnostic (avant traitement majeur).
-* **`fu1` à `fu4`** : Quatre examens de suivi (*Follow-up*) permettant d'observer l'évolution de la pathologie.
+```powershell
+python .\features\exctract_clinical_variables.py
+python .\features\extract_radiomics.py
+python .\features\extract_nifti_features.py
+```
 
-**Séquences disponibles pour chaque étape :**
-* **T1 & T1c** : Visualisation de la structure anatomique et prise de contraste (rehaussement de la tumeur).
-* **T2 & FLAIR** : Identification des zones d'œdème et d'infiltration tumorale.
+### Étape C — Entraîner le modèle RF
 
-#### 2.Données de Segmentation (`tumor segmentation`)
-C'est la partie la plus précieuse du dataset, contenant les **masques de vérité terrain** (*ground truth*) :
-* **Localisation** : Fichiers `.nii` délimitant précisément les contours de la tumeur sur les images IRM.
-* **Utilité** : Indispensable pour entraîner ou valider des algorithmes d'IA (Deep Learning) afin de mesurer automatiquement le volume tumoral.
-* **Évolution** : La présence de fichiers pour chaque `fu` permet de quantifier la croissance ou la régression de la tumeur sous l'effet du traitement.
+```powershell
+python .\random_forest_pipeline.py --data_dir 17253793 --output results_rfml
+```
 
-#### 3.Planification Thérapeutique (`RTP` & `CT`)
-Le dataset inclut des données liées à la stratégie de **radiothérapie** :
-* **`P01_CT.nii`** : Scanner X (Computed Tomography) utilisé pour calculer la densité électronique des tissus.
-* **`P01_RTP.nii`** : Plan de traitement (*Radiotherapy Plan*) définissant la zone cible à irradier, tracée par les oncologues.
-* **`P01_brain_mask.nii`** : Segmentation du cerveau entier utilisée pour isoler l'organe des tissus environnants (os, muscles).
+### Étape D — Prédire/simuler un patient
 
-#### 4.Données Sources (`DICOM`)
-Le dossier `DICOM` contient les fichiers bruts originaux non transformés, classés par dates de capture. C'est la source primaire à partir de laquelle les fichiers NIfTI (`.nii.gz`) de ce projet ont été générés.
+```powershell
+python .\random_forest_pipeline.py --predict --patient_id P03 --simulate_days 200 --output results_rfml
+```
+
+Sorties dans `prediction/P03/` (courbe de volume, NIfTI simulé, CSV de volume simulé).
+
+---
+
+## 6) Pipeline ML/PDE (résumé technique)
+
+Le modèle PDE implémenté est de type Fisher-KPP avec traitement :
+
+\[
+\partial u / \partial t = D \nabla^2 u + r u(1-u) - \alpha c(t)u
+\]
+
+où :
+- `u` = densité tumorale normalisée,
+- `D`, `r`, `alpha` = paramètres prédits,
+- `c(t)` = concentration médicamenteuse modélisée.
+
+### Ce que fait `random_forest_pipeline.py`
+
+1. Charge les tables de features (`features/` prioritaire, fallback racine).
+2. Construit des volumes longitudinaux via segmentations NIfTI.
+3. Estime une “vérité terrain” des paramètres (`D`, `r`, `alpha`, `t_treat`) par patient.
+4. Construit la matrice de features.
+5. Entraîne un Random Forest multi-sorties.
+6. Sauvegarde modèle + métriques + figures.
+7. En mode `--predict`, prédit `D/r/alpha` pour un patient et simule en 3D.
+
+---
+
+## 7) Visualisation
+
+### Viewer 2D scanner
+```powershell
+python .\visualisation\brain_scanner_viewer.py 17253793\P03
+```
+
+### Viewer 3D
+```powershell
+python .\visualisation\brain3d_viewer.py 17253793\P03 --all
+```
+
+---
+
+## 8) Fichiers de sortie importants
+
+### Entraînement (`results_rfml/`)
+- `pde_ml_model.pkl` : modèle sauvegardé,
+- `metrics.csv` : MAE/RMSE/R² par paramètre,
+- `predictions_test.csv` : vérité vs prédiction sur le test set,
+- `ground_truth_parameters.csv` : paramètres estimés patient par patient,
+- `feature_matrix.csv` : features finales utilisées.
+
+### Prédiction (`prediction/<PID>/`)
+- `<PID>_u_Txxxj.nii.gz` : volume simulé final,
+- `<PID>_volumes_sim.csv` : évolution volumique simulée,
+- `simulation_volume.png` : courbe simulation vs points cliniques disponibles.
+
+---
+
+## 9) Détails de configuration utiles
+
+- Le pipeline RF lit d’abord dans `features/`, puis dans la racine.
+- Le fallback “sphère synthétique” est utilisé si le masque de segmentation baseline est absent.
+- `Dose_Gy` = radiothérapie (pas la dose de chimio).
+- `Prior_Chemo` = indicateur binaire (oui/non), pas une dose continue.
+
+---
+
+## 10) Dépannage
+
+### `ModuleNotFoundError: openpyxl`
+
+Installer les dépendances dans le venv :
+
+```powershell
+.\EnvVirtuel\Scripts\activate
+pip install -r .\requirements.txt
+```
+
+### Le patient n’est pas trouvé en prédiction
+
+- vérifier l’ID (`P03`, `P04a`, etc.),
+- vérifier la présence de `17253793/<PID>/`,
+- vérifier les masques dans `tumor_segmentation/`.
+
+### Courbe simulée “très mauvaise”
+
+Causes fréquentes :
+- patient hors distribution d’entraînement,
+- timepoints réels irréguliers vs hypothèse `dt_days` fixe,
+- qualité/consistance des segmentations longitudinales.
+
+---
+
+## 11) Limitations connues
+
+- Pas d’intégration explicite matière grise/blanche dans les features RF actuelles.
+- Pas de localisation anatomique explicite (lobe/atlas) dans la matrice finale.
+- Certaines simplifications temporelles (espacement de suivi).
+- Variabilité inter-patient élevée et petit effectif.
+
+---
+
+## 12) Roadmap suggérée
+
+- intégrer des features de localisation anatomique,
+- utiliser les dates réelles DICOM pour l’axe temporel,
+- renforcer l’évaluation (split temporel/patient, calibration, incertitude),
+- harmoniser l’organisation des scripts (suppression des doublons racine vs sous-dossiers).
+
+---
+
+## 13) Contribuer
+
+1. Créer une branche de travail.
+2. Lancer les scripts dans l’ordre du workflow.
+3. Vérifier que les sorties sont générées dans les bons dossiers (`features/`, `results_rfml/`, `prediction/`).
+4. Ouvrir une PR avec :
+   - contexte du changement,
+   - scripts testés,
+   - exemples de sorties.
+
+---
+
+## 14) Références
+
+- Dataset : [Zenodo DOI 10.5281/zenodo.17253793](https://doi.org/10.5281/zenodo.17253793)
+- Modèle de croissance tumoral inspiré de Fisher-KPP.
