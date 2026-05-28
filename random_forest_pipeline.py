@@ -175,16 +175,19 @@ def _read_tabular_file(path: Path, label: str = "") -> pd.DataFrame:
 
 def load_tabular_data(script_dir: Path):
     """
-    Cherche radiomics / clinical / nifti_features dans script_dir
-    (priorité .xlsx puis .csv).
+    Cherche radiomics / clinical / nifti_features dans script_dir/features
+    puis dans script_dir (priorité .xlsx puis .csv).
     """
     def _find(base):
-        for ext in (".xlsx", ".csv", ".xls"):
-            p = script_dir / (base + ext)
-            if p.exists():
-                return p
+        candidates = [script_dir / "features", script_dir]
+        for folder in candidates:
+            for ext in (".xlsx", ".csv", ".xls"):
+                p = folder / (base + ext)
+                if p.exists():
+                    return p
         raise FileNotFoundError(
-            f"Fichier {base}.xlsx / .csv introuvable dans {script_dir}"
+            f"Fichier {base}.xlsx / .csv introuvable dans {script_dir / 'features'} "
+            f"ni dans {script_dir}"
         )
 
     rad_path  = _find("radiomics_features")

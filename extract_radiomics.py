@@ -13,10 +13,11 @@ Dépendances:
 """
 
 import pandas as pd
+from pathlib import Path
 
 # ── Chemins ────────────────────────────────────────────────────────────────────
 XLSX_PATH   = '17253793\PROTEAS-MRI_radiomics_data.xlsx'   # adapte ce chemin si besoin
-OUTPUT_PATH = 'radiomics_features.csv'
+OUTPUT_PATH = Path("features") / "radiomics_features.csv"
 
 # ── Filtres ────────────────────────────────────────────────────────────────────
 TARGET_MASKS      = ['mask_tumor', 'mask_oedema']
@@ -137,6 +138,7 @@ def main():
         .reset_index(drop=True)
     )
 
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     master.to_csv(OUTPUT_PATH, index=False)
 
     # Rapport

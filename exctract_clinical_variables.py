@@ -1,8 +1,9 @@
 import pandas as pd
+from pathlib import Path
 
 # Nom du fichier source
 input_file = "17253793/PROTEAS-Clinical_and_demographic_data_imputed.xlsx"
-output_file = "clinical_features.csv"
+output_file = Path("features") / "clinical_features.csv"
 
 # Colonnes avec les noms exacts détectés dans ton fichier
 columns_to_extract = [
@@ -29,6 +30,7 @@ def run_extraction():
         
         # Création du nouveau fichier
         df_filtered = df[available_cols]
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         df_filtered.to_csv(output_file, index=False, encoding='utf-8-sig')
         
         print(f"✅ Extraction réussie !")

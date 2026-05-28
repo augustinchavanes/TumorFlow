@@ -39,13 +39,14 @@ import glob
 import numpy as np
 import pandas as pd
 import nibabel as nib
+from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 ROOT_PATH   = "17253793/"          # ← adapte ce chemin
-OUTPUT_PATH = "nifti_features.csv"
+OUTPUT_PATH = Path("features") / "nifti_features.csv"
 
 # Mapping timepoint label -> patterns de fichiers possibles dans tumor_segmentation/
 TIMEPOINTS = ["baseline", "follow_up_1", "follow_up_2", "follow_up_3", "follow_up_4"]
@@ -326,6 +327,7 @@ def build_excel(all_data: dict):
             ws.append(list(row))
         style_sheet(ws, df)
 
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     wb.save(OUTPUT_PATH)
     print(f"\n✓ Export : {OUTPUT_PATH}")
     print(f"  {len(all_records)} features  |  {len(all_data)} patients")
