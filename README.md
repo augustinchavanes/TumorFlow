@@ -34,7 +34,7 @@ Pour cela, il suffit d'activer l'environnement virtuel créer avec toutes les bi
 Cela permet d'avoir accès au dossier des patients avec toutes les informations cliniques et nifti. 
 
 ## Analyse des données
-Lancer data_analyse.py 
+Lancer `python DataAnalyse/data_analyse.py`
 
 Ce script python permet de comprendre, notamment avec des graphiques (Voir DataAnalyse/) de quelles données sont constituées notre dataset.
 
