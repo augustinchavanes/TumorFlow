@@ -190,9 +190,38 @@ python .\visualisation\brain3d_viewer.py 17253793\P03 --all
 - `feature_matrix.csv` : features finales utilisées.
 
 ### Prédiction (`prediction/<PID>/`)
-- `<PID>_u_Txxxj.nii.gz` : volume simulé final,
+- `<PID>_u_Txxxj.nii.gz` : densité 3D finale (continu 0–1),
+- `<PID>_mask_Txxxj.nii.gz` : masque binaire 3D final (densité seuillée),
+- `<PID>_u_4D.nii.gz` : série temporelle 4D de densité (X, Y, Z, T),
+- `<PID>_mask_4D.nii.gz` : série temporelle 4D binaire (X, Y, Z, T),
+- `<PID>_4D_timepoints.csv` : correspondance frame → jour,
+- `<PID>_tissue_map.nii.gz` : carte de tissus (1=CSF, 2=GM, 3=WM), si T1 disponible,
 - `<PID>_volumes_sim.csv` : évolution volumique simulée,
 - `simulation_volume.png` : courbe simulation vs points cliniques disponibles.
+
+Options utiles :
+- `--bin_threshold 0.5` : seuil de binarisation du masque,
+- `--n_snapshots 20` : nombre de frames 3D dans la série 4D (`0` désactive la 4D).
+
+### Modélisation spatiale GM/WM/CSF (modèle de Swanson)
+
+Si un T1 baseline est disponible, le cerveau est segmenté en CSF/GM/WM (K-means sur
+l'intensité T1) et la diffusion devient **hétérogène** :
+
+\[
+\partial u / \partial t = \nabla\cdot(D(x)\,\nabla u) + r(x)\,u(1-u) - \alpha(x)\,c\,u
+\]
+
+La matière blanche diffuse plus vite que la matière grise (autoroutes axonales), le CSF
+est fortement réduit. Options :
+- `--d_wm_gm_ratio 5` : ratio diffusion WM/GM (défaut 5),
+- `--r_wm_gm_ratio 1` : ratio prolifération WM/GM,
+- `--alpha_wm_gm_ratio 1` : ratio réponse au traitement WM/GM,
+- `--csf_factor 0.1` : réduction diffusion/prolifération dans le CSF,
+- `--no_tissue` : désactive et revient à la simulation homogène classique.
+
+Repli automatique sur le mode homogène si le T1 est absent ou de dimensions
+incompatibles avec la grille de simulation.
 
 ---
 

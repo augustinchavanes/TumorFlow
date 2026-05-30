@@ -52,6 +52,29 @@ Usage :
 
   # Prédiction nouveau patient (sorties dans prediction/<patient_id>/)
   python tumor_pde_ml_pipeline.py --predict --patient_id P04a --simulate_days 30
+
+  # Prédiction + masque binaire + série temporelle 4D
+  python tumor_pde_ml_pipeline.py --predict --patient_id P04a --simulate_days 200 \
+      --n_snapshots 20 --bin_threshold 0.5
+
+  # Modélisation spatiale GM/WM/CSF (diffusion plus rapide en matière blanche)
+  python tumor_pde_ml_pipeline.py --predict --patient_id P04a --simulate_days 200 \
+      --d_wm_gm_ratio 7 --csf_factor 0.1
+  # (désactiver : --no_tissue → simulation homogène classique)
+
+Modélisation spatiale (modèle de Swanson) :
+  Si un T1 baseline est disponible, le cerveau est segmenté en CSF/GM/WM (K-means)
+  et la diffusion devient hétérogène : ∂u/∂t = ∇·(D(x)·∇u) + r(x)·u(1−u) − α(x)·c·u.
+  D(x), r(x), α(x) dérivent du tissu (WM = ratios réglables, GM = référence, CSF réduit).
+
+Sorties de prédiction (prediction/<patient_id>/) :
+  <PID>_u_T<j>j.nii.gz      densité 3D finale (continu 0–1)
+  <PID>_mask_T<j>j.nii.gz   masque binaire 3D final (u > seuil)
+  <PID>_u_4D.nii.gz         série temporelle 4D de densité (X,Y,Z,T)
+  <PID>_mask_4D.nii.gz      série temporelle 4D binaire (X,Y,Z,T)
+  <PID>_4D_timepoints.csv   correspondance frame → jour
+  <PID>_tissue_map.nii.gz   carte de tissus (1=CSF, 2=GM, 3=WM) si T1 dispo
+  <PID>_volumes_sim.csv     volume tumoral jour par jour
 ================================================================================
 """
 
@@ -968,12 +991,132 @@ def train_and_evaluate(
 # SECTION 8 — SIMULATION EDP 3D
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Étiquettes de tissus
+TISSUE_BG, TISSUE_CSF, TISSUE_GM, TISSUE_WM = 0, 1, 2, 3
+
+
+def segment_tissue_from_t1(t1_path: Path, brain_mask: np.ndarray = None,
+                            ref_shape: tuple = None) -> np.ndarray:
+    """
+    Segmente le cerveau en 3 tissus (CSF / GM / WM) par K-means sur l'intensité T1.
+
+    Retourne une carte d'étiquettes (même forme que le T1) :
+        0 = hors cerveau, 1 = CSF, 2 = matière grise, 3 = matière blanche.
+    Renvoie None si le T1 est absent/illisible ou incompatible avec ref_shape.
+    """
+    if t1_path is None or not Path(t1_path).exists():
+        return None
+    try:
+        import nibabel as nib
+        from sklearn.cluster import KMeans
+    except ImportError as e:
+        log.warning(f"Segmentation tissus indisponible ({e}).")
+        return None
+
+    try:
+        t1 = nib.load(str(t1_path)).get_fdata()
+    except Exception as e:
+        log.warning(f"T1 illisible ({t1_path}) : {e}")
+        return None
+
+    if ref_shape is not None and t1.shape != tuple(ref_shape):
+        log.warning(f"T1 {t1.shape} ≠ grille simulation {tuple(ref_shape)} — tissus ignorés.")
+        return None
+
+    # Masque cerveau : fourni, sinon seuil simple sur intensité positive
+    if brain_mask is not None and brain_mask.shape == t1.shape:
+        mask = brain_mask > 0
+    else:
+        mask = t1 > (0.05 * float(t1.max()) if t1.max() > 0 else 0.0)
+
+    vals = t1[mask].reshape(-1, 1)
+    if vals.size < 10:
+        return None
+
+    km = KMeans(n_clusters=3, n_init=4, random_state=0).fit(vals)
+    centers = km.cluster_centers_.ravel()
+    # Trie les clusters par intensité croissante : CSF < GM < WM
+    order = np.argsort(centers)
+    remap = {int(order[0]): TISSUE_CSF,
+             int(order[1]): TISSUE_GM,
+             int(order[2]): TISSUE_WM}
+
+    tissue = np.zeros(t1.shape, dtype=np.uint8)
+    labels_flat = np.vectorize(remap.get)(km.labels_)
+    tissue[mask] = labels_flat.astype(np.uint8)
+
+    n_csf = int((tissue == TISSUE_CSF).sum())
+    n_gm  = int((tissue == TISSUE_GM).sum())
+    n_wm  = int((tissue == TISSUE_WM).sum())
+    log.info(f"Tissus (T1) : CSF={n_csf:,}  GM={n_gm:,}  WM={n_wm:,} voxels")
+    return tissue
+
+
+def build_param_fields(tissue: np.ndarray, D: float, r: float, alpha: float,
+                        d_wm_gm_ratio: float = 5.0,
+                        r_wm_gm_ratio: float = 1.0,
+                        alpha_wm_gm_ratio: float = 1.0,
+                        csf_factor: float = 0.1):
+    """
+    Construit les champs 3D D(x), r(x), alpha(x) à partir de la carte de tissus.
+
+    Convention : la matière grise (GM) est la référence (multiplicateur 1.0).
+        WM  : ratios *_wm_gm_ratio (diffusion typiquement 5–10× plus rapide).
+        CSF : diffusion/prolifération fortement réduites (csf_factor).
+        Hors cerveau / non classé : comportement GM par défaut.
+
+    Retourne (D_field, r_field, alpha_field) en float64.
+    """
+    mult_D     = np.ones(tissue.shape, dtype=np.float64)
+    mult_r     = np.ones(tissue.shape, dtype=np.float64)
+    mult_alpha = np.ones(tissue.shape, dtype=np.float64)
+
+    wm = tissue == TISSUE_WM
+    mult_D[wm]     = d_wm_gm_ratio
+    mult_r[wm]     = r_wm_gm_ratio
+    mult_alpha[wm] = alpha_wm_gm_ratio
+
+    csf = tissue == TISSUE_CSF
+    mult_D[csf]     = csf_factor
+    mult_r[csf]     = csf_factor
+    mult_alpha[csf] = 1.0  # le traitement agit aussi sur d'éventuelles cellules en CSF
+
+    return D * mult_D, r * mult_r, alpha * mult_alpha
+
+
+def _divergence_D_grad(u: np.ndarray, D_field: np.ndarray, dx: float) -> np.ndarray:
+    """
+    Forme à flux du terme de diffusion : ∇·(D(x)·∇u), schéma volumes finis.
+
+    D aux faces = moyenne arithmétique des voxels voisins.
+    Conditions de Neumann (flux nul) imposées aux bords du domaine.
+    """
+    div = np.zeros_like(u)
+    for ax in range(3):
+        u_next = np.roll(u, -1, ax)
+        D_next = np.roll(D_field, -1, ax)
+        D_face = 0.5 * (D_field + D_next)
+        flux   = D_face * (u_next - u) / dx          # flux à l'interface i+1/2
+
+        # Flux nul à la frontière éloignée (pas d'effet de bord périodique)
+        sl = [slice(None)] * 3; sl[ax] = -1
+        flux[tuple(sl)] = 0.0
+
+        flux_prev = np.roll(flux, 1, ax)             # flux à l'interface i-1/2
+        div += (flux - flux_prev) / dx
+    return div
+
+
 def simulate_pde_3d(D: float, r: float, alpha: float,
                    u0_3d: np.ndarray, dx_mm: float,
                    t_days: float, c0: float = C0,
                    lam: float = LAMBDA_DRUG,
                    t_treat: float = 0.0,
-                   voxel_volume_mm3: float = None):
+                   voxel_volume_mm3: float = None,
+                   n_snapshots: int = 0,
+                   D_field: np.ndarray = None,
+                   r_field: np.ndarray = None,
+                   alpha_field: np.ndarray = None):
     """
     Version corrigée : 
     1. Utilise la somme intégrale de 'u' pour des courbes fluides (plus de plateau à zéro).
@@ -982,8 +1125,19 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
     voxel_volume_mm3 : volume d'un voxel en mm³ (ex. prod(zooms) du NIfTI).
         Si fourni, les volumes rapportés coïncident avec ceux des masques (extract_volume_from_mask).
         Sinon : dx_mm**3 (grille isotrope).
+    n_snapshots : si > 0, capture ~n_snapshots champs 3D de densité u répartis
+        uniformément dans le temps (pour construire une série temporelle 4D).
+    D_field/r_field/alpha_field : champs 3D optionnels (mêmes dims que u0_3d).
+        Si D_field est fourni, la diffusion utilise la forme à flux ∇·(D(x)∇u)
+        et r/alpha utilisent leurs champs s'ils sont fournis (sinon scalaires).
+
+    Retourne (u_final, volumes, snapshots, snapshot_days) où :
+        snapshots     : liste de champs 3D float32 (vide si n_snapshots <= 0)
+        snapshot_days : instants (jours) correspondant à chaque snapshot
     """
-    dt_cfl  = (dx_mm ** 2) / (6.0 * D + 1e-12)
+    use_fields = D_field is not None
+    D_max  = float(D_field.max()) if use_fields else float(D)
+    dt_cfl  = (dx_mm ** 2) / (6.0 * D_max + 1e-12)
     dt      = min(1.0, dt_cfl * 0.9)
     n_steps = max(1, int(np.ceil(t_days / dt)))
     dt      = t_days / n_steps
@@ -993,6 +1147,17 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
     
     # CORRECTION 1 : On utilise np.sum(u) dès le départ pour la fluidité
     volumes = [float(np.sum(u) * vox_vol)]
+
+    # Indices de pas à capturer pour la série temporelle 4D (inclut l'état initial et final)
+    snapshots, snapshot_days = [], []
+    capture_steps = set()
+    if n_snapshots and n_snapshots > 0:
+        capture_steps = set(
+            int(s) for s in np.linspace(0, n_steps, int(n_snapshots))
+        )
+        if 0 in capture_steps:
+            snapshots.append(u.astype(np.float32).copy())
+            snapshot_days.append(0.0)
 
     log.info(f"Simulation EDP 3D | Protocole Multi-cycles | D={D:.4f}  r={r:.5f}  α={alpha:.4f}")
 
@@ -1009,30 +1174,44 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
                     # Chaque cycle ajoute sa propre concentration qui décroît
                     c_t += c0 * np.exp(-lam * (t_now - t_cycle_start))
 
-        # Calcul du Laplacien (Diffusion)
-        lap = (
-              np.roll(u,-1,0)+np.roll(u,1,0)
-            + np.roll(u,-1,1)+np.roll(u,1,1)
-            + np.roll(u,-1,2)+np.roll(u,1,2)
-            - 6.0 * u
-        ) / dx_mm ** 2
-        
-        # Conditions de Neumann (bords du cerveau)
-        for ax in range(3):
-            s0 = [slice(None)]*3; s0[ax] = 0
-            s1 = [slice(None)]*3; s1[ax] = 1
-            sm = [slice(None)]*3; sm[ax] = -1
-            s2 = [slice(None)]*3; s2[ax] = -2
-            lap[tuple(s0)] = lap[tuple(s1)]
-            lap[tuple(sm)] = lap[tuple(s2)]
-        
+        # Terme de diffusion
+        if use_fields:
+            # Forme à flux ∇·(D(x)∇u) — gère D variable dans l'espace (Neumann intégré)
+            diff = _divergence_D_grad(u, D_field, dx_mm)
+        else:
+            # Laplacien homogène (D scalaire)
+            lap = (
+                  np.roll(u,-1,0)+np.roll(u,1,0)
+                + np.roll(u,-1,1)+np.roll(u,1,1)
+                + np.roll(u,-1,2)+np.roll(u,1,2)
+                - 6.0 * u
+            ) / dx_mm ** 2
+            # Conditions de Neumann (bords du cerveau)
+            for ax in range(3):
+                s0 = [slice(None)]*3; s0[ax] = 0
+                s1 = [slice(None)]*3; s1[ax] = 1
+                sm = [slice(None)]*3; sm[ax] = -1
+                s2 = [slice(None)]*3; s2[ax] = -2
+                lap[tuple(s0)] = lap[tuple(s1)]
+                lap[tuple(sm)] = lap[tuple(s2)]
+            diff = D * lap
+
+        # Termes de réaction et de traitement (champs si fournis, sinon scalaires)
+        r_eff     = r_field     if r_field     is not None else r
+        alpha_eff = alpha_field if alpha_field is not None else alpha
+
         # Mise à jour de la densité tumorale
-        u = np.clip(u + dt*(D*lap + r*u*(1.0-u) - alpha*c_t*u), 0.0, 1.0)
+        u = np.clip(u + dt*(diff + r_eff*u*(1.0-u) - alpha_eff*c_t*u), 0.0, 1.0)
         
         # CORRECTION 1 (suite) : Somme intégrale pour suivre l'évolution sans seuil brutal
         volumes.append(float(np.sum(u) * vox_vol))
 
-    return u, volumes
+        # Capture du champ 3D pour la série temporelle 4D
+        if (step + 1) in capture_steps:
+            snapshots.append(u.astype(np.float32).copy())
+            snapshot_days.append((step + 1) * dt)
+
+    return u, volumes, snapshots, snapshot_days
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1042,11 +1221,19 @@ def simulate_pde_3d(D: float, r: float, alpha: float,
 def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
                          simulate_days: float = 30.0,
                          output_dir: Path = Path("results_rfml"),
-                         dt_days: float = 56.0) -> dict:
+                         dt_days: float = 56.0,
+                         bin_threshold: float = 0.5,
+                         n_snapshots: int = 20,
+                         use_tissue: bool = True,
+                         d_wm_gm_ratio: float = 5.0,
+                         r_wm_gm_ratio: float = 1.0,
+                         alpha_wm_gm_ratio: float = 1.0,
+                         csf_factor: float = 0.1) -> dict:
     """
     1. Extrait les features NIfTI depuis les fichiers réels du patient
     2. Prédit D, r, α avec le Random Forest sauvegardé
-    3. Simule l'évolution tumorale à T+simulate_days jours
+    3. (optionnel) Segmente GM/WM/CSF depuis le T1 → champs D(x), r(x), α(x)
+    4. Simule l'évolution tumorale à T+simulate_days jours
     """
     bundle       = joblib.load(str(model_pkl))
     model        = bundle["model"]
@@ -1129,14 +1316,50 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         )
         log.info("Sphère synthétique utilisée (masque absent)")
 
-    u_final, volumes = simulate_pde_3d(
+    # Champs spatiaux D(x), r(x), α(x) depuis la carte de tissus (T1 baseline)
+    D_field = r_field = alpha_field = None
+    tissue_map = None
+    if use_tissue:
+        brain_arr = None
+        bm_path = paths.get("brain_mask")
+        if bm_path is not None and Path(bm_path).exists():
+            try:
+                import nibabel as nib
+                bm = nib.load(str(bm_path)).get_fdata()
+                if bm.shape == seg_array.shape:
+                    brain_arr = (bm > 0).astype(np.uint8)
+            except Exception as e:
+                log.warning(f"brain_mask non chargeable : {e}")
+
+        tissue_map = segment_tissue_from_t1(
+            paths["t1"]["baseline"], brain_mask=brain_arr,
+            ref_shape=seg_array.shape,
+        )
+        if tissue_map is not None:
+            D_field, r_field, alpha_field = build_param_fields(
+                tissue_map, D_pred, r_pred, alpha_pred,
+                d_wm_gm_ratio=d_wm_gm_ratio,
+                r_wm_gm_ratio=r_wm_gm_ratio,
+                alpha_wm_gm_ratio=alpha_wm_gm_ratio,
+                csf_factor=csf_factor,
+            )
+            log.info(
+                f"Champs spatiaux activés | D_WM/GM={d_wm_gm_ratio}  "
+                f"r_WM/GM={r_wm_gm_ratio}  α_WM/GM={alpha_wm_gm_ratio}  CSF×{csf_factor}"
+            )
+        else:
+            log.info("Carte de tissus indisponible — simulation homogène (repli).")
+
+    u_final, volumes, snapshots, snapshot_days = simulate_pde_3d(
         D_pred, r_pred, alpha_pred, seg_array, dx_mm, simulate_days,
         t_treat=t_treat_pred,
         voxel_volume_mm3=vox_vol_mm3,
+        n_snapshots=n_snapshots,
+        D_field=D_field, r_field=r_field, alpha_field=alpha_field,
     )
     vox_report = vox_vol_mm3 if vox_vol_mm3 is not None else float(dx_mm ** 3)
-    V_i = float((seg_array > 0.5).sum() * vox_report)
-    V_f = float((u_final > 0.5).sum() * vox_report)
+    V_i = float((seg_array > bin_threshold).sum() * vox_report)
+    V_f = float((u_final > bin_threshold).sum() * vox_report)
     s   = "+" if V_f >= V_i else ""
     print(f"\n  ── Simulation T+{simulate_days:.0f}j ────────────────────────────────────")
     print(f"  Volume initial  : {V_i:>10.1f} mm³")
@@ -1145,15 +1368,47 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
 
     # Sauvegarde
     output_dir.mkdir(parents=True, exist_ok=True)
+    affine = np.diag([dx_mm, dx_mm, dx_mm, 1.0])
     try:
         import nibabel as nib
+        # 1) Champ de densité final (continu 0–1)
         nib.save(
-            nib.Nifti1Image(u_final.astype(np.float32),
-                            np.diag([dx_mm, dx_mm, dx_mm, 1.0])),
+            nib.Nifti1Image(u_final.astype(np.float32), affine),
             str(output_dir / f"{patient_id}_u_T{int(simulate_days)}j.nii.gz"),
         )
-    except Exception:
-        pass
+        # 2) Masque binaire final (densité seuillée)
+        final_mask = (u_final > bin_threshold).astype(np.uint8)
+        nib.save(
+            nib.Nifti1Image(final_mask, affine),
+            str(output_dir / f"{patient_id}_mask_T{int(simulate_days)}j.nii.gz"),
+        )
+        # 3) Séries temporelles 4D (densité + masque binaire) si snapshots disponibles
+        if snapshots:
+            series_4d = np.stack(snapshots, axis=-1)  # (X, Y, Z, T)
+            nib.save(
+                nib.Nifti1Image(series_4d.astype(np.float32), affine),
+                str(output_dir / f"{patient_id}_u_4D.nii.gz"),
+            )
+            nib.save(
+                nib.Nifti1Image((series_4d > bin_threshold).astype(np.uint8), affine),
+                str(output_dir / f"{patient_id}_mask_4D.nii.gz"),
+            )
+            pd.DataFrame({
+                "frame": range(len(snapshot_days)),
+                "days":  snapshot_days,
+            }).to_csv(output_dir / f"{patient_id}_4D_timepoints.csv", index=False)
+            log.info(
+                f"Série 4D : {series_4d.shape[-1]} frames "
+                f"(densité + masque, seuil={bin_threshold})"
+            )
+        # 4) Carte de tissus (si segmentée) : 1=CSF 2=GM 3=WM
+        if tissue_map is not None:
+            nib.save(
+                nib.Nifti1Image(tissue_map.astype(np.uint8), affine),
+                str(output_dir / f"{patient_id}_tissue_map.nii.gz"),
+            )
+    except Exception as e:
+        log.warning(f"Sauvegarde NIfTI partielle : {e}")
     pd.DataFrame({
         "step": range(len(volumes)),
         "days": np.linspace(0, simulate_days, len(volumes)),
@@ -1185,6 +1440,16 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         v_front=2*np.sqrt(r_pred*D_pred),
         lambda_front=np.sqrt(D_pred/r_pred),
         u_initial=seg_array, u_final=u_final,
+        u_final_mask=(u_final > bin_threshold).astype(np.uint8),
+        tissue_map=tissue_map,
+        tissue_active=tissue_map is not None,
+        d_wm_gm_ratio=d_wm_gm_ratio,
+        r_wm_gm_ratio=r_wm_gm_ratio,
+        alpha_wm_gm_ratio=alpha_wm_gm_ratio,
+        csf_factor=csf_factor,
+        bin_threshold=bin_threshold,
+        n_snapshots=len(snapshots),
+        snapshot_days=np.asarray(snapshot_days, dtype=float),
         volumes_evolution=volumes,
         V_initial_mm3=V_i, V_final_mm3=V_f,
         dx_mm=dx_mm, simulate_days=simulate_days,
@@ -1281,11 +1546,24 @@ def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
                            edgecolors="white", linewidths=1.0,
                            label="Volumes dossier (t ≤ T sim.)")
 
+        if sim_result.get("tissue_active"):
+            d_gm  = sim_result['D_pred']
+            d_ratio = sim_result.get('d_wm_gm_ratio', 1.0)
+            d_wm  = d_gm * d_ratio
+            param_line = (
+                f"D(x) hétérogène : GM={d_gm:.4f} → WM={d_wm:.4f} mm²/j (×{d_ratio:g})  "
+                f"CSF×{sim_result.get('csf_factor', 0.1):g}\n"
+                f"r={sim_result['r_pred']:.5f} /j  α={sim_result['alpha_pred']:.4f} /j"
+            )
+        else:
+            param_line = (
+                f"D={sim_result['D_pred']:.4f} mm²/j  "
+                f"r={sim_result['r_pred']:.5f} /j  "
+                f"α={sim_result['alpha_pred']:.4f} /j"
+            )
         ax.set(xlabel="Temps (jours)", ylabel="Volume tumoral (mm³)",
                title=(f"Simulation EDP 3D — T+{sim_result['simulate_days']:.0f}j\n"
-                      f"D={sim_result['D_pred']:.4f} mm²/j  "
-                      f"r={sim_result['r_pred']:.5f} /j  "
-                      f"α={sim_result['alpha_pred']:.4f} /j"))
+                      f"{param_line}"))
 
         ymin, ymax = float(np.min(vols)), float(np.max(vols))
         if ct is not None and cv is not None and ct.size > 0 and cv.size == ct.size:
@@ -1330,6 +1608,22 @@ def parse_args():
     p.add_argument("--predict",      action="store_true")
     p.add_argument("--patient_id",   default=None, help="Ex: P04a")
     p.add_argument("--simulate_days",type=float, default=30.0)
+    p.add_argument("--bin_threshold", type=float, default=0.5,
+                   help="Seuil de densité u pour binariser le masque prédit")
+    p.add_argument("--n_snapshots",  type=int, default=20,
+                   help="Nombre de frames 3D capturées pour la série temporelle 4D "
+                        "(0 = désactive la sortie 4D)")
+    # Modélisation spatiale GM/WM/CSF (champs D(x), r(x), α(x))
+    p.add_argument("--no_tissue", action="store_true",
+                   help="Désactive la carte de tissus (simulation homogène classique)")
+    p.add_argument("--d_wm_gm_ratio", type=float, default=5.0,
+                   help="Ratio diffusion matière blanche / grise")
+    p.add_argument("--r_wm_gm_ratio", type=float, default=1.0,
+                   help="Ratio prolifération matière blanche / grise")
+    p.add_argument("--alpha_wm_gm_ratio", type=float, default=1.0,
+                   help="Ratio réponse au traitement matière blanche / grise")
+    p.add_argument("--csf_factor", type=float, default=0.1,
+                   help="Facteur réducteur de diffusion/prolifération dans le CSF")
     return p.parse_args()
 
 
@@ -1353,16 +1647,28 @@ def main():
         model_pkl = output_dir / "pde_ml_model.pkl"
         if not model_pkl.exists():
             log.error(f"Modèle introuvable : {model_pkl}"); sys.exit(1)
-        pred_out = script_dir / "prediction" / args.patient_id
+        # Patients à prédire : directement dans prediction/<PID>/
+        patient_dir = script_dir / "prediction" / args.patient_id
+        if not patient_dir.exists():
+            log.error(f"Dossier patient introuvable : {patient_dir}"); sys.exit(1)
+        # Sorties de prédiction : prediction/<PID>/prediction/
+        pred_out = patient_dir / "prediction"
         pred_out.mkdir(parents=True, exist_ok=True)
         sim = predict_new_patient(
-            model_pkl, data_dir / args.patient_id,
+            model_pkl, patient_dir,
             args.patient_id, args.simulate_days, pred_out,
             dt_days=args.dt_days,
+            bin_threshold=args.bin_threshold,
+            n_snapshots=args.n_snapshots,
+            use_tissue=not args.no_tissue,
+            d_wm_gm_ratio=args.d_wm_gm_ratio,
+            r_wm_gm_ratio=args.r_wm_gm_ratio,
+            alpha_wm_gm_ratio=args.alpha_wm_gm_ratio,
+            csf_factor=args.csf_factor,
         )
         generate_plots(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
                        sim_result=sim, output_dir=pred_out)
-        rel = Path("prediction") / args.patient_id
+        rel = Path("prediction") / args.patient_id / "prediction"
         print(f"\n  Les sorties de prédiction sont dans le dossier : {rel.as_posix()}/")
         print(f"  (chemin complet : {pred_out.resolve()}/)\n")
         log.info("Prédictions écrites dans %s", pred_out.resolve())
