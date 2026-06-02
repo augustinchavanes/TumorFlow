@@ -576,6 +576,32 @@ def _simulate_ode(times_days, u0, r, alpha, t_treat: float):
     return sol.y[0] if sol.success else np.full(len(times), np.nan)
 
 
+def simulate_ode_volume_continuous(r, alpha, t_treat, V_baseline_mm3,
+                                   t_end_days, n_points=400,
+                                   V_cap_mm3=None, vols_hint=None):
+    """
+    Solution ODE 0D en volume [mm³] sur une grille temporelle dense.
+    Même modèle que estimate_patient_parameters (1 cycle chimio après t_treat).
+    """
+    vols_hint = list(vols_hint or []) + [float(V_baseline_mm3)]
+    V_cap = float(V_cap_mm3) if V_cap_mm3 is not None else max(
+        max(vols_hint) * 2.5, V_baseline_mm3 * 2.5, 1.0,
+    )
+    u0 = float(np.clip(V_baseline_mm3 / V_cap, 1e-6, 1.0))
+    t_end = max(float(t_end_days), 1e-6)
+    n_points = max(int(n_points), 2)
+    times = np.linspace(0.0, t_end, n_points)
+    sol = solve_ivp(
+        _ode_kpp_phases,
+        t_span=(0.0, t_end),
+        y0=[u0], args=(float(r), float(alpha), float(t_treat)),
+        t_eval=times, method="RK45", rtol=1e-6, atol=1e-9, max_step=0.5,
+    )
+    if not sol.success:
+        return times, np.full(len(times), np.nan)
+    return sol.t, sol.y[0] * V_cap
+
+
 def _estimate_D_from_shape(sphericity: float, max_diam_mm: float,
                             elongation: float) -> float:
     """
@@ -777,6 +803,80 @@ def build_feature_matrix(gt_df: pd.DataFrame, rad: pd.DataFrame,
 # SECTION 7 — MODÈLE ML : RANDOM FOREST MULTI-SORTIES
 # ─────────────────────────────────────────────────────────────────────────────
 
+def load_augmented_training_tables(augmented_dir: Path):
+    """Charge X_augmented.csv et y_augmented.csv (apres augment_biomedical_dataset.py)."""
+    augmented_dir = Path(augmented_dir)
+    x_path = augmented_dir / "X_augmented.csv"
+    y_path = augmented_dir / "y_augmented.csv"
+    if not x_path.exists() or not y_path.exists():
+        raise FileNotFoundError(
+            f"Fichiers augmentes introuvables dans {augmented_dir.resolve()}/\n"
+            "Lancez d'abord : python augment_biomedical_dataset.py"
+        )
+    return pd.read_csv(x_path), pd.read_csv(y_path)
+
+
+def _build_augmented_train_test(
+    X_aug: pd.DataFrame,
+    y_aug: pd.DataFrame,
+    feature_cols: list,
+    test_size: float = 0.2,
+):
+    """
+    Train = patients reels (hors test) + tous les synthetiques.
+    Test  = uniquement patients reels (jamais de SYN_*).
+    """
+    y_cols = ["Patient_ID"] + TARGET_PARAMS
+    merged = X_aug.merge(y_aug[y_cols], on="Patient_ID", how="inner")
+    if "is_synthetic" not in merged.columns:
+        raise ValueError("Colonne is_synthetic absente dans X_augmented.csv")
+
+    feat = [c for c in feature_cols if c in merged.columns]
+    if not feat:
+        feat = [
+            c for c in merged.columns
+            if c not in ("Patient_ID", "is_synthetic", "source_id") + TARGET_PARAMS
+        ]
+
+    real = merged[merged["is_synthetic"].astype(int) == 0].copy()
+    syn  = merged[merged["is_synthetic"].astype(int) == 1].copy()
+
+    if len(real) < 6:
+        raise ValueError(
+            f"Pas assez de patients reels dans les donnees augmentees ({len(real)})."
+        )
+
+    X_real = real[feat].values.astype(float)
+    Y_real = real[TARGET_PARAMS].values.astype(float)
+    pids_real = real["Patient_ID"].values
+
+    X_tr_r, X_te, Y_tr_r, Y_te, pid_tr_r, pid_te = train_test_split(
+        X_real, Y_real, pids_real,
+        test_size=test_size, random_state=42,
+    )
+
+    if len(syn) > 0:
+        X_syn = syn[feat].values.astype(float)
+        Y_syn = syn[TARGET_PARAMS].values.astype(float)
+        X_tr = np.vstack([X_tr_r, X_syn])
+        Y_tr = np.vstack([Y_tr_r, Y_syn])
+    else:
+        X_tr, Y_tr = X_tr_r, Y_tr_r
+
+    meta = dict(
+        n_real=len(real),
+        n_synthetic=len(syn),
+        n_train=len(X_tr),
+        n_train_real=len(X_tr_r),
+        n_train_synthetic=len(syn),
+        n_test=len(X_te),
+        feature_cols=feat,
+        X_real_scaled_source=X_real,
+        Y_real=Y_real,
+    )
+    return X_tr, Y_tr, X_te, Y_te, pid_te, meta
+
+
 def build_rf_model(n_estimators: int = 300, max_depth: int = 5,
                    min_samples_leaf: int = 2) -> MultiOutputRegressor:
     """
@@ -814,6 +914,7 @@ def train_and_evaluate(
     test_size:    float = 0.2,
     n_cv_folds:   int   = 5,
     output_dir:   Path  = Path("results_rfml"),
+    augmented_dir: Path = None,
 ):
     """
     Entraîne le Random Forest multi-sorties et évalue ses performances.
@@ -829,53 +930,81 @@ def train_and_evaluate(
       8. Feature importances top-10 par paramètre
       9. Sauvegarde (pde_ml_model.pkl, metrics.csv enrichi)
     """
-    # ── 1. Dataset valide ─────────────────────────────────────────────────────
+    use_aug = augmented_dir is not None
     n_gt_rows     = len(gt_df)
-    n_success_gt  = int(gt_df["success"].sum())
-    valid         = gt_df[gt_df["success"]][["Patient_ID"] + TARGET_PARAMS].dropna()
-    n_valid_ml    = len(valid)
-    X_sub         = X_df[X_df["Patient_ID"].isin(valid["Patient_ID"])]
-    X_sub         = X_sub.set_index("Patient_ID").reindex(valid["Patient_ID"])
-    X_arr         = X_sub[feature_cols].values
-    Y_arr         = valid[TARGET_PARAMS].values
+    n_success_gt  = int(gt_df["success"].sum()) if "success" in gt_df.columns else n_gt_rows
+    aug_meta      = None
 
-    log.info(
-        f"Effectifs GT → total lignes : {n_gt_rows} | success=True : {n_success_gt} | "
-        f"ML (success + D,r,α sans NaN) : {n_valid_ml}"
-    )
-    log.info(f"Dataset ML : {X_arr.shape[0]} patients × {X_arr.shape[1]} features → "
-             f"3 cibles (D, r, α)")
-
-    if X_arr.shape[0] < 6:
-        log.error(
-            "< 6 patients valides — entraînement impossible.\n"
-            "Conseils : réduire --dt_days, vérifier les masques de segmentation, "
-            "ou abaisser le seuil R² dans estimate_patient_parameters()."
+    # ── 1. Dataset (standard ou augmente) ─────────────────────────────────────
+    if use_aug:
+        X_aug, y_aug = load_augmented_training_tables(augmented_dir)
+        X_tr, Y_tr, X_te, Y_te, pid_te, aug_meta = _build_augmented_train_test(
+            X_aug, y_aug, feature_cols, test_size=test_size,
         )
-        return None, None, None, None
+        feature_cols = aug_meta["feature_cols"]
+        scaler = StandardScaler()
+        X_tr = scaler.fit_transform(X_tr)
+        X_te = scaler.transform(X_te)
+        X_real = aug_meta["X_real_scaled_source"]
+        Y_real = aug_meta["Y_real"]
+        X_scaled_real = scaler.transform(X_real)
+        n_valid_ml = aug_meta["n_real"]
+        n_train = aug_meta["n_train"]
+        n_test = aug_meta["n_test"]
+        log.info(
+            "Mode AUGMENTE : train=%d (%d reels + %d synth.) | test=%d (reels uniquement)",
+            n_train, aug_meta["n_train_real"], aug_meta["n_train_synthetic"], n_test,
+        )
+        print(
+            f"\n  Entrainement augmente : {n_train} lignes train "
+            f"({aug_meta['n_train_real']} reels + {aug_meta['n_train_synthetic']} synthetiques)"
+        )
+        print(f"  Test (reels seulement) : {n_test} patients")
+    else:
+        valid         = gt_df[gt_df["success"]][["Patient_ID"] + TARGET_PARAMS].dropna()
+        n_valid_ml    = len(valid)
+        X_sub         = X_df[X_df["Patient_ID"].isin(valid["Patient_ID"])]
+        X_sub         = X_sub.set_index("Patient_ID").reindex(valid["Patient_ID"])
+        X_arr         = X_sub[feature_cols].values
+        Y_arr         = valid[TARGET_PARAMS].values
 
-    # ── 2. Normalisation ──────────────────────────────────────────────────────
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X_arr)
+        log.info(
+            f"Effectifs GT -> total : {n_gt_rows} | success=True : {n_success_gt} | "
+            f"ML valides : {n_valid_ml}"
+        )
+        log.info(f"Dataset ML : {X_arr.shape[0]} patients x {X_arr.shape[1]} features")
 
-    # ── 3. Split train / test ──────────────────────────────────────────────────
-    X_tr, X_te, Y_tr, Y_te, pid_tr, pid_te = train_test_split(
-        X_scaled, Y_arr, valid["Patient_ID"].values,
-        test_size=test_size, random_state=42,
-    )
-    n_train, n_test = X_tr.shape[0], X_te.shape[0]
-    log.info(f"Split train/test : {n_train} train | {n_test} test (fraction test={test_size})")
+        if X_arr.shape[0] < 6:
+            log.error(
+                "< 6 patients valides — entrainement impossible.\n"
+                "Conseils : reduire --dt_days, verifier les masques, "
+                "ou lancer augment_biomedical_dataset.py puis --use_augmented."
+            )
+            return None, None, None, None
 
-    # ── 3b. CV R² sur tout le jeu valide (avant split — plus stable qu'un seul test)
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X_arr)
+        X_tr, X_te, Y_tr, Y_te, pid_tr, pid_te = train_test_split(
+            X_scaled, Y_arr, valid["Patient_ID"].values,
+            test_size=test_size, random_state=42,
+        )
+        X_scaled_real = X_scaled
+        Y_real = Y_arr
+        n_train, n_test = X_tr.shape[0], X_te.shape[0]
+        log.info(f"Split train/test : {n_train} train | {n_test} test (test_size={test_size})")
+
+    # ── 3b. CV R² sur patients REELS uniquement (pas les synthetiques) ─────────
     rf_template = build_rf_model(n_estimators, max_depth, min_samples_leaf)
-    n_splits_full = min(max(2, n_cv_folds), X_arr.shape[0])
+    n_splits_full = min(max(2, n_cv_folds), X_scaled_real.shape[0])
     kfold_full    = KFold(n_splits=n_splits_full, shuffle=True, random_state=43)
     cv_full_results = {}
-    print(f"\n  Cross-validation {n_splits_full}-fold (tout le jeu valide, {X_arr.shape[0]} patients) :")
+    label_cv = "reels" if use_aug else "valides"
+    print(f"\n  Cross-validation {n_splits_full}-fold (patients {label_cv}, "
+          f"{X_scaled_real.shape[0]} lignes) :")
     for i, param in enumerate(TARGET_PARAMS):
         scores_f = cross_val_score(
             clone(rf_template.estimator),
-            X_scaled, Y_arr[:, i],
+            X_scaled_real, Y_real[:, i],
             cv=kfold_full, scoring="r2",
         )
         cv_full_results[param] = scores_f
@@ -944,6 +1073,8 @@ def train_and_evaluate(
             n_valid_ml=n_valid_ml,
             n_train=n_train,
             n_test=n_test,
+            n_train_synthetic=aug_meta["n_train_synthetic"] if use_aug else 0,
+            training_mode="augmented" if use_aug else "standard",
         ))
     print("═" * 58)
     metrics_df = pd.DataFrame(metrics)
@@ -972,17 +1103,23 @@ def train_and_evaluate(
 
     # ── 9. Sauvegarde ─────────────────────────────────────────────────────────
     output_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(
-        {"model": model, "scaler": scaler, "feature_cols": feature_cols,
-         "model_type": "random_forest",
-         "hyperparams": {"n_estimators": n_estimators,
-                         "max_depth": max_depth,
-                         "min_samples_leaf": min_samples_leaf}},
-        output_dir / "pde_ml_model.pkl",
-    )
-    metrics_df.to_csv(output_dir / "metrics.csv",            index=False)
-    preds_df.to_csv(output_dir / "predictions_test.csv",     index=False)
-    log.info(f"Modèle Random Forest → {output_dir / 'pde_ml_model.pkl'}")
+    bundle = {
+        "model": model, "scaler": scaler, "feature_cols": feature_cols,
+        "model_type": "random_forest",
+        "training_mode": "augmented" if use_aug else "standard",
+        "hyperparams": {"n_estimators": n_estimators,
+                        "max_depth": max_depth,
+                        "min_samples_leaf": min_samples_leaf},
+    }
+    joblib.dump(bundle, output_dir / "pde_ml_model.pkl")
+    if use_aug:
+        joblib.dump(bundle, output_dir / "pde_ml_model_augmented.pkl")
+        metrics_df.to_csv(output_dir / "metrics_augmented.csv", index=False)
+        preds_df.to_csv(output_dir / "predictions_test_augmented.csv", index=False)
+    else:
+        metrics_df.to_csv(output_dir / "metrics.csv", index=False)
+        preds_df.to_csv(output_dir / "predictions_test.csv", index=False)
+    log.info("Modele Random Forest -> %s", output_dir / "pde_ml_model.pkl")
 
     return model, scaler, metrics_df, preds_df
 
@@ -1415,24 +1552,23 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         "volume_mm3": volumes,
     }).to_csv(output_dir / f"{patient_id}_volumes_sim.csv", index=False)
 
-    # Volumes masques baseline + follow_up_* (graphique uniquement ; FU filtrés au tracé si t > simulate_days)
-    obs_t, obs_v = [], []
-    base_seg = paths["seg"]["baseline"]
-    if base_seg.exists():
-        vb = extract_volume_from_mask(base_seg)
-        if vb is not None and vb > 0:
-            obs_t.append(0.0)
-            obs_v.append(float(vb))
-    for tp_label in ("follow_up_1", "follow_up_2", "follow_up_3", "follow_up_4"):
-        seg_p = paths["seg"][tp_label]
-        if not seg_p.exists():
-            continue
-        vol_m = extract_volume_from_mask(seg_p)
-        if vol_m is None or vol_m <= 0:
-            continue
-        tp_int = TIMEPOINT_TO_INT[tp_label]
-        obs_t.append(float(tp_int * dt_days))
-        obs_v.append(float(vol_m))
+    obs_t, obs_v = collect_clinical_volumes(paths, dt_days, simulate_days)
+
+    ode_days, ode_vols = simulate_ode_volume_continuous(
+        r_pred, alpha_pred, t_treat_pred, V_i, simulate_days,
+        vols_hint=list(obs_v) if obs_v.size else None,
+    )
+    pd.DataFrame({"days": ode_days, "volume_mm3": ode_vols}).to_csv(
+        output_dir / f"{patient_id}_ode_volumes.csv", index=False,
+    )
+    save_ode_volume_plot(
+        patient_id, ode_days, ode_vols,
+        D_pred, r_pred, alpha_pred, t_treat_pred,
+        output_dir,
+        clinical_time_days=obs_t, clinical_volume_mm3=obs_v,
+        param_source="coefficients Random Forest (patient)",
+        simulate_days=simulate_days,
+    )
 
     return dict(
         D_pred=D_pred, r_pred=r_pred, alpha_pred=alpha_pred,
@@ -1453,14 +1589,132 @@ def predict_new_patient(model_pkl: Path, patient_dir: Path, patient_id: str,
         volumes_evolution=volumes,
         V_initial_mm3=V_i, V_final_mm3=V_f,
         dx_mm=dx_mm, simulate_days=simulate_days,
-        clinical_time_days=np.asarray(obs_t, dtype=float),
-        clinical_volume_mm3=np.asarray(obs_v, dtype=float),
+        clinical_time_days=obs_t,
+        clinical_volume_mm3=obs_v,
+        ode_time_days=ode_days,
+        ode_volume_mm3=ode_vols,
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 10 — VISUALISATIONS
 # ─────────────────────────────────────────────────────────────────────────────
+
+def save_ode_volume_plot(patient_id: str, days, volumes_mm3,
+                         D, r, alpha, t_treat, output_dir: Path,
+                         clinical_time_days=None, clinical_volume_mm3=None,
+                         param_source: str = "fit ODE",
+                         r_squared=None, simulate_days=None):
+    """Courbe ODE 0D continue + points cliniques optionnels."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning("matplotlib absent — ode_volume.png non genere")
+        return
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    days = np.asarray(days, dtype=float)
+    vols = np.asarray(volumes_mm3, dtype=float)
+    t_win = float(simulate_days if simulate_days is not None else days[-1])
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(days, vols, color="#9B2226", lw=2.5,
+            label="Volume ODE 0D (solution continue)")
+    ax.fill_between(days, 0, vols, alpha=0.08, color="#9B2226")
+
+    ct = cv = None
+    if clinical_time_days is not None and clinical_volume_mm3 is not None:
+        ct = np.asarray(clinical_time_days, dtype=float)
+        cv = np.asarray(clinical_volume_mm3, dtype=float)
+        m = ct <= t_win + 1e-9
+        ct, cv = ct[m], cv[m]
+        if ct.size > 0:
+            o = np.argsort(ct)
+            ax.scatter(ct[o], cv[o], color="#1D3557", s=85, zorder=5,
+                       edgecolors="white", linewidths=1.0,
+                       label="Evaluations reelles (masques)")
+            ax.plot(ct[o], cv[o], color="#1D3557", ls="--", lw=1.2, alpha=0.55)
+
+    line = (
+        f"D={D:.4f} mm2/j  r={r:.5f}/j  alpha={alpha:.4f}/j  "
+        f"t_treat={t_treat:.1f}j  |  {param_source}"
+    )
+    if r_squared is not None and not np.isnan(r_squared):
+        line += f"  R2_ODE={r_squared:.3f}"
+
+    ax.set(xlabel="Temps (jours)", ylabel="Volume tumoral (mm3)",
+           title=f"Solution ODE — {patient_id} — T+{t_win:.0f}j\n{line}")
+    ymin = float(np.nanmin(np.r_[vols, cv if cv is not None and cv.size else vols]))
+    ymax = float(np.nanmax(np.r_[vols, cv if cv is not None and cv.size else vols]))
+    pad = (ymax - ymin) * 0.08 + 1e-6
+    ax.set_ylim(max(0.0, ymin - pad), ymax + pad)
+    ax.set_xlim(0.0, t_win)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(output_dir / "ode_volume.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info(f"{patient_id}: ode_volume.png -> {output_dir}")
+
+
+def collect_clinical_volumes(paths: dict, dt_days: float, t_max: float):
+    """Volumes masques baseline + FU pour overlay graphique."""
+    obs_t, obs_v = [], []
+    base_seg = paths["seg"]["baseline"]
+    if base_seg.exists():
+        vb = extract_volume_from_mask(base_seg)
+        if vb is not None and vb > 0:
+            obs_t.append(0.0)
+            obs_v.append(float(vb))
+    for tp_label in ("follow_up_1", "follow_up_2", "follow_up_3", "follow_up_4"):
+        seg_p = paths["seg"][tp_label]
+        if not seg_p.exists():
+            continue
+        vol_m = extract_volume_from_mask(seg_p)
+        if vol_m is None or vol_m <= 0:
+            continue
+        t_day = float(TIMEPOINT_TO_INT[tp_label] * dt_days)
+        if t_day <= t_max + 1e-9:
+            obs_t.append(t_day)
+            obs_v.append(float(vol_m))
+    return np.asarray(obs_t, dtype=float), np.asarray(obs_v, dtype=float)
+
+
+def plot_patient_ode_from_volumes(patient_id: str, vols, times, rad_baseline: dict,
+                                  output_dir: Path, simulate_days: float = 200.0,
+                                  n_ode_points: int = 400):
+    """
+    Coefficients uniques par patient via fit ODE sur tous ses timepoints
+    (estimate_patient_parameters), puis courbe continue.
+    """
+    params = estimate_patient_parameters(vols, times, rad_baseline)
+    if not params.get("success") and np.isnan(params.get("r", np.nan)):
+        log.warning(f"{patient_id}: fit ODE echoue — graphique non genere")
+        return params
+
+    V0 = float(params["V_baseline"])
+    days, v_ode = simulate_ode_volume_continuous(
+        params["r"], params["alpha"], params["t_treat"], V0,
+        simulate_days, n_points=n_ode_points,
+        V_cap_mm3=params.get("V_cap"),
+    )
+    pd.DataFrame({"days": days, "volume_mm3": v_ode}).to_csv(
+        output_dir / f"{patient_id}_ode_volumes.csv", index=False,
+    )
+    save_ode_volume_plot(
+        patient_id, days, v_ode,
+        params["D"], params["r"], params["alpha"], params["t_treat"],
+        output_dir,
+        clinical_time_days=times, clinical_volume_mm3=vols,
+        param_source="coefficients fit ODE (patient)",
+        r_squared=params.get("r_squared"),
+        simulate_days=simulate_days,
+    )
+    return params
+
 
 def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
                    metrics_df: pd.DataFrame, sim_result: dict = None,
@@ -1524,9 +1778,15 @@ def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
         vols = sim_result["volumes_evolution"]
         days = np.linspace(0, sim_result.get("simulate_days", len(vols)), len(vols))
         fig, ax = plt.subplots(figsize=(9, 5))
-        ax.plot(days, vols, color="#E63946", lw=2.5, label="Volume simulé (EDP)")
+        ax.plot(days, vols, color="#E63946", lw=2.5, label="Volume simulé (EDP 3D)")
         ax.axhline(vols[0], color="gray", ls=":", lw=1.5, label="Volume initial")
         ax.fill_between(days, vols[0], vols, alpha=0.1, color="#E63946")
+
+        ode_t = sim_result.get("ode_time_days")
+        ode_v = sim_result.get("ode_volume_mm3")
+        if ode_t is not None and ode_v is not None:
+            ax.plot(np.asarray(ode_t), np.asarray(ode_v), color="#9B2226", lw=2.0,
+                    ls="-", alpha=0.9, label="ODE 0D (memes coefficients RF)")
 
         ct = sim_result.get("clinical_time_days")
         cv = sim_result.get("clinical_volume_mm3")
@@ -1566,6 +1826,9 @@ def generate_plots(gt_df: pd.DataFrame, preds_df: pd.DataFrame,
                       f"{param_line}"))
 
         ymin, ymax = float(np.min(vols)), float(np.max(vols))
+        if ode_v is not None:
+            ymin = min(ymin, float(np.nanmin(ode_v)))
+            ymax = max(ymax, float(np.nanmax(ode_v)))
         if ct is not None and cv is not None and ct.size > 0 and cv.size == ct.size:
             ymin = min(ymin, float(np.min(cv)))
             ymax = max(ymax, float(np.max(cv)))
@@ -1624,6 +1887,19 @@ def parse_args():
                    help="Ratio réponse au traitement matière blanche / grise")
     p.add_argument("--csf_factor", type=float, default=0.1,
                    help="Facteur réducteur de diffusion/prolifération dans le CSF")
+    p.add_argument("--plot_ode", action="store_true",
+                   help="Trace la solution ODE 0D avec coefficients fites sur le patient "
+                        "(longitudinal) — requiert --patient_id")
+    p.add_argument("--ode_points", type=int, default=400,
+                   help="Nombre de points pour la courbe ODE continue")
+    p.add_argument("--use_augmented", action="store_true",
+                   help="Entraine le RF sur X_augmented/y_augmented (200 lignes). "
+                        "Test toujours sur patients reels uniquement.")
+    p.add_argument("--augmented_dir", default="results_rfml/augmented",
+                   help="Dossier contenant X_augmented.csv et y_augmented.csv")
+    p.add_argument("--train_augmented_only", action="store_true",
+                   help="Entrainement augmente seul (sans recalculer GT/features). "
+                        "Requiert --use_augmented et CSV deja generes.")
     return p.parse_args()
 
 
@@ -1640,6 +1916,35 @@ def main():
     print(f"  Script  : {script_dir}")
     print(f"  Données : {data_dir}  {'✓' if data_dir.exists() else '⚠ absent — CSV fallback'}")
     print(f"  Sorties : {output_dir}\n")
+
+    if args.plot_ode:
+        if not args.patient_id:
+            log.error("--patient_id requis avec --plot_ode"); sys.exit(1)
+        rad, clin, nifti_df = load_tabular_data(script_dir)
+        vol_df = build_longitudinal_volumes(data_dir, nifti_df, dt_days=args.dt_days)
+        pat = vol_df[vol_df["Patient_ID"] == args.patient_id].sort_values("tp_int")
+        if pat.empty:
+            log.error(f"Pas de volumes pour {args.patient_id}"); sys.exit(1)
+        rad_t1c = rad[
+            (rad["Mask"] == "mask_tumor") & (rad["Sequence"] == "t1c") &
+            (rad["Timepoint_Label"] == "baseline")
+        ]
+        rad_row = {}
+        if not rad_t1c.empty:
+            row = rad_t1c[rad_t1c["Patient_ID"] == args.patient_id]
+            if row.empty:
+                row = rad_t1c.iloc[[0]]
+            rad_row = row.iloc[0].to_dict()
+        ode_out = output_dir / "ode_curves" / args.patient_id
+        ode_out.mkdir(parents=True, exist_ok=True)
+        t_end = max(args.simulate_days, float(pat["time_days"].max()))
+        plot_patient_ode_from_volumes(
+            args.patient_id,
+            pat["Volume_mm3"].values, pat["time_days"].values,
+            rad_row, ode_out, simulate_days=t_end, n_ode_points=args.ode_points,
+        )
+        print(f"\n  Courbe ODE -> {ode_out.resolve()}/ode_volume.png\n")
+        return
 
     if args.predict:
         if not args.patient_id:
@@ -1674,27 +1979,47 @@ def main():
         log.info("Prédictions écrites dans %s", pred_out.resolve())
         return
 
-    # ── Pipeline d'entraînement ───────────────────────────────────────────────
-    log.info("ÉTAPE 1/5 — Chargement des données tabulaires")
-    rad, clin, nifti_df = load_tabular_data(script_dir)
+    augmented_dir = script_dir / args.augmented_dir if args.use_augmented else None
+    if args.train_augmented_only and not args.use_augmented:
+        log.error("--train_augmented_only requiert --use_augmented"); sys.exit(1)
 
-    log.info("ÉTAPE 2/5 — Volumes longitudinaux (NIfTI réels + CSV fallback)")
-    vol_df = build_longitudinal_volumes(data_dir, nifti_df, dt_days=args.dt_days)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    vol_df.to_csv(output_dir / "longitudinal_volumes.csv", index=False)
+    if args.train_augmented_only:
+        log.info("Mode rapide : entrainement augmente depuis CSV existants")
+        gt_path = output_dir / "ground_truth_parameters.csv"
+        if not gt_path.exists():
+            log.error("Manque ground_truth_parameters.csv — "
+                      "lancez d'abord python random_forest_pipeline.py"); sys.exit(1)
+        gt_df = pd.read_csv(gt_path)
+        X_aug, _ = load_augmented_training_tables(augmented_dir)
+        feat_cols = [
+            c for c in X_aug.columns
+            if c not in ("Patient_ID", "is_synthetic", "source_id")
+        ]
+        X_df = X_aug[X_aug["is_synthetic"].astype(int) == 0][["Patient_ID"] + feat_cols]
+    else:
+        log.info("ÉTAPE 1/5 — Chargement des données tabulaires")
+        rad, clin, nifti_df = load_tabular_data(script_dir)
 
-    log.info("ÉTAPE 3/5 — Features NIfTI baseline")
-    nifti_feats = extract_all_nifti_features(data_dir)
-    if not nifti_feats.empty:
-        nifti_feats.to_csv(output_dir / "nifti_baseline_features.csv", index=False)
+        log.info("ÉTAPE 2/5 — Volumes longitudinaux (NIfTI réels + CSV fallback)")
+        vol_df = build_longitudinal_volumes(data_dir, nifti_df, dt_days=args.dt_days)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        vol_df.to_csv(output_dir / "longitudinal_volumes.csv", index=False)
 
-    log.info("ÉTAPE 4/5 — Vérité terrain (D, r, α) par patient")
-    gt_df = build_ground_truth(vol_df, clin, rad)
-    gt_df.to_csv(output_dir / "ground_truth_parameters.csv", index=False)
+        log.info("ÉTAPE 3/5 — Features NIfTI baseline")
+        nifti_feats = extract_all_nifti_features(data_dir)
+        if not nifti_feats.empty:
+            nifti_feats.to_csv(output_dir / "nifti_baseline_features.csv", index=False)
 
-    log.info("ÉTAPE 5/5 — Matrice X + entraînement Random Forest")
-    X_df, feat_cols = build_feature_matrix(gt_df, rad, clin, nifti_feats)
-    X_df.to_csv(output_dir / "feature_matrix.csv", index=False)
+        log.info("ÉTAPE 4/5 — Vérité terrain (D, r, α) par patient")
+        gt_df = build_ground_truth(vol_df, clin, rad)
+        gt_df.to_csv(output_dir / "ground_truth_parameters.csv", index=False)
+
+        log.info("ÉTAPE 5/5 — Matrice X + entraînement Random Forest")
+        X_df, feat_cols = build_feature_matrix(gt_df, rad, clin, nifti_feats)
+        X_df.to_csv(output_dir / "feature_matrix.csv", index=False)
+
+    if args.use_augmented:
+        load_augmented_training_tables(augmented_dir)  # verifie que les CSV existent
 
     model, scaler, metrics_df, preds_df = train_and_evaluate(
         X_df, gt_df, feat_cols,
@@ -1704,6 +2029,7 @@ def main():
         test_size       = args.test_size,
         n_cv_folds      = args.n_cv_folds,
         output_dir      = output_dir,
+        augmented_dir   = augmented_dir,
     )
 
     if model is not None:

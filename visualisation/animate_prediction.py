@@ -121,16 +121,54 @@ def load_days(timepoints_csv, n_frames):
     return [f"frame {i}" for i in range(n_frames)]
 
 
+def _patient_id_from_nifti(path: Path) -> str:
+    """Extrait P04a depuis P04a_u_4D.nii.gz ou dossier .../P04a/..."""
+    stem = path.stem.replace(".nii", "")
+    for suffix in ("_u_4D", "_mask_4D", "_u_T", "_mask_T"):
+        if suffix in stem:
+            return stem.split(suffix)[0]
+    if stem.endswith("_u") or stem.endswith("_mask"):
+        return stem.rsplit("_", 1)[0]
+    parent = path.parent.name
+    if parent and parent[0] == "P" and parent[1:2].isdigit():
+        return parent
+    return stem.split("_")[0] if "_" in stem else stem
+
+
 def find_brain_mask(nifti_4d_path: Path, explicit: str = None):
     """
     Localise le masque cerveau du patient.
-    Cherche dans le dossier du patient (parent et grand-parent du NIfTI 4D),
-    par ex. prediction/<PID>/<PID>_brain_mask.nii.gz.
+    Cherche : dossier du NIfTI, prediction/<PID>/, 17253793/<PID>/ (dataset).
     """
     if explicit:
         p = Path(explicit)
         return p if p.exists() else None
-    candidates_dirs = [nifti_4d_path.parent, nifti_4d_path.parent.parent]
+
+    pid = _patient_id_from_nifti(nifti_4d_path)
+    nifti_4d_path = Path(nifti_4d_path).resolve()
+    # Racine projet = parent de visualisation/ si possible
+    roots = [nifti_4d_path.parents[i] for i in range(min(5, len(nifti_4d_path.parents)))]
+    project_root = None
+    for r in roots:
+        if (r / "17253793").is_dir() or (r / "prediction").is_dir():
+            project_root = r
+            break
+    if project_root is None:
+        project_root = nifti_4d_path.parent.parent.parent
+
+    candidates_dirs = [
+        nifti_4d_path.parent,
+        nifti_4d_path.parent.parent,
+        project_root / "prediction" / pid,
+        project_root / "17253793" / pid,
+    ]
+    named = [
+        project_root / "prediction" / pid / f"{pid}_brain_mask.nii.gz",
+        project_root / "17253793" / pid / f"{pid}_brain_mask.nii.gz",
+    ]
+    for p in named:
+        if p.exists():
+            return p
     for d in candidates_dirs:
         if not d.exists():
             continue
